@@ -335,7 +335,7 @@ static inline void inj_release_finger(int finger_idx)
 static int inj_init(void)
 {
     struct input_dev *found = NULL;
-    struct class *input_class;
+    struct class *input_class = NULL;
     void *kln_addr;
     struct kprobe kp = { .symbol_name = "kallsyms_lookup_name" };
     int ret, i;
