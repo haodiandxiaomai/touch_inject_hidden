@@ -12,6 +12,8 @@ jobs:
     env:
       ANDROID_VERSION: "android14"
       KERNEL_VERSION: "6.1"
+      KERNEL_SUBVERSION: "128.0"
+      KERNEL_TAG: "android14-6.1-128.0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -84,6 +86,29 @@ jobs:
           repo sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc)
           echo "KERNEL_ROOT=$KR" >> $GITHUB_ENV
 
+      - name: Pin to exact kernel version
+        run: |
+          cd $KERNEL_ROOT/common
+          # 尝试 checkout 精确的 tag
+          TAG="${{ env.KERNEL_TAG }}"
+          if git tag -l "$TAG" | grep -q "$TAG"; then
+            git checkout "$TAG"
+            echo "Checked out tag: $TAG"
+          elif git tag -l "${TAG%.0}" | grep -q "${TAG%.0}"; then
+            git checkout "${TAG%.0}"
+            echo "Checked out tag: ${TAG%.0}"
+          else
+            # 查找最近的匹配 tag
+            MATCH=$(git tag -l "android14-6.1-*" | grep -v rc | sort -V | tail -1)
+            if [ -n "$MATCH" ]; then
+              git checkout "$MATCH"
+              echo "Checked out latest tag: $MATCH"
+            fi
+          fi
+          git log --oneline -1
+          # 显示内核版本
+          cat Makefile | head -5
+
       - name: Clone patches
         run: |
           cd $GITHUB_WORKSPACE
@@ -124,6 +149,8 @@ jobs:
           tools/bazel build --disk_cache=$HOME/.cache/bazel --config=fast //common:kernel_aarch64_dist || exit 1
           echo "Kernel built OK"
           strings bazel-bin/common/kernel_aarch64/Image | grep 'Linux version' | head -1
+          echo "=== Verify kernel version ==="
+          strings bazel-bin/common/kernel_aarch64/Image | grep 'Linux version'
 
       - name: Build touch_inject_hidden.ko
         run: |
