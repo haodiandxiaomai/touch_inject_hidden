@@ -175,51 +175,49 @@ jobs:
           KDIR=$KERNEL_ROOT/common
 
           echo "=== Setup kernel headers for module build ==="
-          # autoconf.h
+          KDIR=$KERNEL_ROOT/common
+
+          # autoconf.h & Module.symvers
           mkdir -p $KDIR/include/generated
           cp /tmp/khdr/include/generated/autoconf.h $KDIR/include/generated/autoconf.h
           cp $BO/kernel_aarch64_Module.symvers $KDIR/Module.symvers
 
-          # asm headers — 关键修复
-          # /tmp/khdr/include/uapi/asm/ 包含 types.h 等 UAPI 头文件
-          # 需要把它们放到三个位置：
-          #   1. include/uapi/asm/    (UAPI asm 头文件)
-          #   2. include/asm/          (内核内部 asm 头文件)
-          #   3. arch/arm64/include/asm/ (arch-specific asm)
-          #   4. arch/arm64/include/generated/asm/ (generated asm)
+          # 关键修复：确保 arm64 asm 头文件可用
+          # bazel 构建不会生成 arch/arm64/include/asm/ 下的头文件
+          # 需要从两个来源补充：
+          #   1. 内核源码自带的 UAPI 头文件 (include/uapi/asm/)
+          #   2. 提取的内核头文件 (/tmp/khdr/)
 
-          # UAPI asm
-          mkdir -p $KDIR/include/uapi/asm
-          cp -r /tmp/khdr/include/uapi/asm/* $KDIR/include/uapi/asm/ 2>/dev/null || true
-
-          # 内部 asm — 从 UAPI 和 extracted headers 合并
-          mkdir -p $KDIR/include/asm
-          cp -r /tmp/khdr/include/uapi/asm/* $KDIR/include/asm/ 2>/dev/null || true
-          cp -r /tmp/khdr/include/asm/* $KDIR/include/asm/ 2>/dev/null || true
-
-          # arch/arm64/include/asm — 检查是否是 symlink
-          if [ -L "$KDIR/arch/arm64/include/asm" ]; then
-            echo "arch/arm64/include/asm is a symlink, replacing with directory"
-            rm -f $KDIR/arch/arm64/include/asm
-          fi
+          echo "--- Copy UAPI asm headers from kernel source ---"
+          # 内核源码 include/uapi/asm/ 包含 types.h 等基础头文件
+          # 复制到 arch/arm64/include/asm/ (内核内部 include 路径)
           mkdir -p $KDIR/arch/arm64/include/asm
-          cp -r /tmp/khdr/include/uapi/asm/* $KDIR/arch/arm64/include/asm/ 2>/dev/null || true
-          cp -r /tmp/khdr/include/asm/* $KDIR/arch/arm64/include/asm/ 2>/dev/null || true
+          cp -r $KDIR/include/uapi/asm/* $KDIR/arch/arm64/include/asm/ 2>/dev/null || true
 
-          # generated/asm
+          # 也复制到 include/asm/ (另一个搜索路径)
+          mkdir -p $KDIR/include/asm
+          cp -r $KDIR/include/uapi/asm/* $KDIR/include/asm/ 2>/dev/null || true
+
+          echo "--- Copy extracted headers from /tmp/khdr ---"
+          # 提取的头文件可能有额外的 generated asm 头
           mkdir -p $KDIR/arch/arm64/include/generated/asm
           cp -r /tmp/khdr/include/generated/asm/* $KDIR/arch/arm64/include/generated/asm/ 2>/dev/null || true
 
-          # 也拷贝 generated/uapi/asm
           mkdir -p $KDIR/include/generated/uapi/asm
           cp -r /tmp/khdr/include/generated/uapi/asm/* $KDIR/include/generated/uapi/asm/ 2>/dev/null || true
+
+          # 如果 /tmp/khdr 有 arch/arm64 的头文件，也复制
+          if [ -d /tmp/khdr/arch/arm64/include ]; then
+            cp -r /tmp/khdr/arch/arm64/include/* $KDIR/arch/arm64/include/ 2>/dev/null || true
+          fi
 
           # 创建 module.lds
           mkdir -p $KDIR/scripts
           printf '%s\n' 'SECTIONS' '{' '  /DISCARD/ : { *(.discard) *(.discard.*) }' '}' > $KDIR/scripts/module.lds
 
-          echo "=== Verify asm/types.h exists ==="
-          find $KDIR -name "types.h" -path "*/asm/*" 2>/dev/null | head -5
+          echo "=== Verify asm/types.h exists for arm64 ==="
+          find $KDIR/arch/arm64 -name "types.h" -path "*/asm/*" 2>/dev/null
+          find $KDIR/include -name "types.h" -path "*/asm/*" 2>/dev/null
 
           echo "=== Building module ==="
           make -C $KDIR M=$PWD ARCH=arm64 LLVM=1 \
