@@ -12,8 +12,8 @@ jobs:
     env:
       ANDROID_VERSION: "android14"
       KERNEL_VERSION: "6.1"
-      KERNEL_SUBVERSION: "128.0"
-      KERNEL_TAG: "android14-6.1-128.0"
+      OS_PATCH_LEVEL: "2025-03"
+      FORMATTED_BRANCH: "android14-6.1-2025-03"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,50 +63,38 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: a14-6.1-ccache-hidden-v1
+          key: a14-6.1-128-ccache-v1
           restore-keys: |
-            a14-6.1-ccache-
+            a14-6.1-128-ccache-
 
       - name: Git config
         run: |
           git config --global user.name "BuildBot"
           git config --global user.email "build@ci.local"
 
-      - name: Sync kernel
+      - name: Sync kernel (android14-6.1-2025-03 = 6.1.128)
         run: |
-          FB="${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}"
+          FB="${{ env.FORMATTED_BRANCH }}"
           KR="$GITHUB_WORKSPACE/$FB"
           mkdir -p "$KR"
           cd "$KR"
+
+          echo "初始化 repo，分支: common-$FB"
           repo init --depth=1 -u https://android.googlesource.com/kernel/manifest -b common-$FB --repo-rev=v2.16
+
           RB=$(git ls-remote https://android.googlesource.com/kernel/common $FB 2>/dev/null || true)
           if grep -q deprecated <<< "$RB" 2>/dev/null; then
+            echo "检测到已弃用的分支，使用 deprecated 路径"
             sed -i "s/\"$FB\"/\"deprecated\/$FB\"/g" .repo/manifests/default.xml
           fi
+
           repo sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc)
+
           echo "KERNEL_ROOT=$KR" >> $GITHUB_ENV
 
-      - name: Pin to exact kernel version
-        run: |
-          cd $KERNEL_ROOT/common
-          # 尝试 checkout 精确的 tag
-          TAG="${{ env.KERNEL_TAG }}"
-          if git tag -l "$TAG" | grep -q "$TAG"; then
-            git checkout "$TAG"
-            echo "Checked out tag: $TAG"
-          elif git tag -l "${TAG%.0}" | grep -q "${TAG%.0}"; then
-            git checkout "${TAG%.0}"
-            echo "Checked out tag: ${TAG%.0}"
-          else
-            # 查找最近的匹配 tag
-            MATCH=$(git tag -l "android14-6.1-*" | grep -v rc | sort -V | tail -1)
-            if [ -n "$MATCH" ]; then
-              git checkout "$MATCH"
-              echo "Checked out latest tag: $MATCH"
-            fi
-          fi
-          git log --oneline -1
-          # 显示内核版本
+          # 显示内核版本确认
+          cd common
+          make ARCH=arm64 defconfig 2>/dev/null || true
           cat Makefile | head -5
 
       - name: Clone patches
@@ -120,110 +108,81 @@ jobs:
           cd $KERNEL_ROOT
           DEFCONFIG=common/arch/arm64/configs/gki_defconfig
           cp "$DEFCONFIG" "${DEFCONFIG}.orig"
+
           if [ -d "$GITHUB_WORKSPACE/susfs4ksu" ]; then
             for p in $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/50*.patch; do
               [ -f "$p" ] && (patch -p1 --forward < "$p" || true)
             done
           fi
+
           if [ -d "$GITHUB_WORKSPACE/SukiSU_patch" ]; then
             for p in $GITHUB_WORKSPACE/SukiSU_patch/6.1/*.patch; do
               [ -f "$p" ] && (patch -p1 --forward < "$p" || true)
             done
           fi
+
           sed -i 's/-dirty//' common/scripts/setlocalversion 2>/dev/null || true
           sed -i '/protected_exports_list.*android\/abi_gki_protected_exports_aarch64/d' common/BUILD.bazel 2>/dev/null || true
           sed -i '/kmi_symbol_list_strict_mode/d' common/BUILD.bazel 2>/dev/null || true
           rm -f common/android/abi_gki_protected_exports_*
           sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
 
-      - name: Build kernel
+      - name: Build kernel + modules_prepare
         run: |
           cd $KERNEL_ROOT
           sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' common/build.config.gki.aarch64 2>/dev/null || true
           sed -i '/MODULES_ORDER=android\/gki_aarch64_modules/d' common/build.config.gki.aarch64 2>/dev/null || true
           sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' common/build.config.gki.aarch64 2>/dev/null || true
+
           DEFCONFIG=common/arch/arm64/configs/gki_defconfig
           FRAG="common/arch/arm64/configs/ksu.fragment"
           diff "${DEFCONFIG}.orig" "$DEFCONFIG" | grep '^>' | sed 's/^> //; s/^[[:space:]]*//' > "$FRAG" || true
           cp "${DEFCONFIG}.orig" "$DEFCONFIG"
-          tools/bazel build --disk_cache=$HOME/.cache/bazel --config=fast //common:kernel_aarch64_dist || exit 1
-          echo "Kernel built OK"
-          strings bazel-bin/common/kernel_aarch64/Image | grep 'Linux version' | head -1
-          echo "=== Verify kernel version ==="
-          strings bazel-bin/common/kernel_aarch64/Image | grep 'Linux version'
+
+          echo "=== 编译内核 + modules_prepare ==="
+          tools/bazel build --disk_cache=$HOME/.cache/bazel --config=fast \
+            //common:kernel_aarch64 //common:kernel_aarch64_modules_prepare || exit 1
+
+          echo "=== 内核版本确认 ==="
+          BAZEL_OUT=$(readlink -f bazel-bin/common/kernel_aarch64)
+          strings $BAZEL_OUT/Image | grep 'Linux version' | head -1
+
+          echo "=== 解压 modules_prepare ==="
+          cd $BAZEL_OUT
+          if [ -f "../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz" ]; then
+            tar -xzf ../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz
+            echo "modules_prepare 解压完成"
+          else
+            echo "ERROR: modules_prepare_outdir.tar.gz 不存在"
+            ls -la ../kernel_aarch64_modules_prepare/
+            exit 1
+          fi
+
+          echo "BAZEL_OUT=$BAZEL_OUT" >> $GITHUB_ENV
 
       - name: Build touch_inject_hidden.ko
         run: |
-          cd $KERNEL_ROOT
-          BO="$KERNEL_ROOT/bazel-bin/common/kernel_aarch64"
-          echo "=== Extract headers ==="
-          mkdir -p /tmp/khdr
-          tar xzf $BO/out-dir-kernel-headers.tar.gz -C /tmp/khdr/
-          echo "=== Generate .config ==="
-          cd $KERNEL_ROOT/common
-          make ARCH=arm64 gki_defconfig
-          sed -i 's/CONFIG_KASAN=y/# CONFIG_KASAN is not set/' .config
-          sed -i 's/CONFIG_KASAN_INLINE=y/# CONFIG_KASAN_INLINE is not set/' .config
-          sed -i 's/CONFIG_KASAN_STACK=y/# CONFIG_KASAN_STACK is not set/' .config
-          echo "CONFIG_INPUT=y" >> .config
-          echo "CONFIG_INPUT_MISC=y" >> .config
-          make ARCH=arm64 CC=clang HOSTCC=gcc olddefconfig
-          echo "=== Prepare module build ==="
-          echo "=== Build module ==="
-          cd $GITHUB_WORKSPACE/touch_inject_hidden/kernel
-          sed -i 's/-fconserve-stack//g' $KERNEL_ROOT/common/Makefile 2>/dev/null || true
-          KDIR=$KERNEL_ROOT/common
+          DRIVER_SRC="$GITHUB_WORKSPACE/touch_inject_hidden/kernel"
+          KDIR="$KERNEL_ROOT/common"
 
-          echo "=== Setup kernel headers for module build ==="
-          KDIR=$KERNEL_ROOT/common
+          echo "=== 使用 lsdriver 方式编译模块 ==="
+          echo "O=$BAZEL_OUT"
+          echo "M=$DRIVER_SRC"
 
-          # autoconf.h & Module.symvers
-          mkdir -p $KDIR/include/generated
-          cp /tmp/khdr/include/generated/autoconf.h $KDIR/include/generated/autoconf.h
-          cp $BO/kernel_aarch64_Module.symvers $KDIR/Module.symvers
+          env PATH="$KERNEL_ROOT/prebuilts/clang/host/linux-x86/clang-r487747c/bin:$PATH" \
+            make -C "$KDIR" \
+              O="$BAZEL_OUT" \
+              M="$DRIVER_SRC" \
+              ARCH=arm64 \
+              LLVM=1 \
+              LLVM_IAS=1 \
+              CROSS_COMPILE="$KERNEL_ROOT/prebuilts/ndk-r23/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-" \
+              CLANG_TRIPLE=aarch64-linux-gnu- \
+              modules -j$(nproc)
 
-          # 关键修复：确保 arm64 asm 头文件可用
-          # bazel 构建不会生成 arch/arm64/include/asm/ 下的头文件
-          # 需要从两个来源补充：
-          #   1. 内核源码自带的 UAPI 头文件 (include/uapi/asm/)
-          #   2. 提取的内核头文件 (/tmp/khdr/)
-
-          echo "--- Copy UAPI asm headers from kernel source ---"
-          # 内核源码 include/uapi/asm/ 包含 types.h 等基础头文件
-          # 复制到 arch/arm64/include/asm/ (内核内部 include 路径)
-          mkdir -p $KDIR/arch/arm64/include/asm
-          cp -r $KDIR/include/uapi/asm/* $KDIR/arch/arm64/include/asm/ 2>/dev/null || true
-
-          # 也复制到 include/asm/ (另一个搜索路径)
-          mkdir -p $KDIR/include/asm
-          cp -r $KDIR/include/uapi/asm/* $KDIR/include/asm/ 2>/dev/null || true
-
-          echo "--- Copy extracted headers from /tmp/khdr ---"
-          # 提取的头文件可能有额外的 generated asm 头
-          mkdir -p $KDIR/arch/arm64/include/generated/asm
-          cp -r /tmp/khdr/include/generated/asm/* $KDIR/arch/arm64/include/generated/asm/ 2>/dev/null || true
-
-          mkdir -p $KDIR/include/generated/uapi/asm
-          cp -r /tmp/khdr/include/generated/uapi/asm/* $KDIR/include/generated/uapi/asm/ 2>/dev/null || true
-
-          # 如果 /tmp/khdr 有 arch/arm64 的头文件，也复制
-          if [ -d /tmp/khdr/arch/arm64/include ]; then
-            cp -r /tmp/khdr/arch/arm64/include/* $KDIR/arch/arm64/include/ 2>/dev/null || true
-          fi
-
-          # 创建 module.lds
-          mkdir -p $KDIR/scripts
-          printf '%s\n' 'SECTIONS' '{' '  /DISCARD/ : { *(.discard) *(.discard.*) }' '}' > $KDIR/scripts/module.lds
-
-          echo "=== Verify asm/types.h exists for arm64 ==="
-          find $KDIR/arch/arm64 -name "types.h" -path "*/asm/*" 2>/dev/null
-          find $KDIR/include -name "types.h" -path "*/asm/*" 2>/dev/null
-
-          echo "=== Building module ==="
-          make -C $KDIR M=$PWD ARCH=arm64 LLVM=1 \
-            KCFLAGS="-Wno-error=unknown-warning-option -Wno-unknown-warning-option" modules
-          ls -la touch_inject_hidden.ko
-          file touch_inject_hidden.ko
+          echo "=== 编译结果 ==="
+          ls -la $DRIVER_SRC/touch_inject_hidden.ko
+          file $DRIVER_SRC/touch_inject_hidden.ko
 
       - name: Build client
         run: |
@@ -234,7 +193,7 @@ jobs:
       - name: Upload .ko
         uses: actions/upload-artifact@v4
         with:
-          name: touch_inject_hidden-ko
+          name: touch_inject_hidden-6.1.128-ko
           path: touch_inject_hidden/kernel/touch_inject_hidden.ko
 
       - name: Upload client
