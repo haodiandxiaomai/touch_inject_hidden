@@ -40,7 +40,7 @@ jobs:
       - name: 安装系统依赖
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
-          packages: ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves bc clang lld binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu
+          packages: ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves bc clang lld binutils-aarch64-linux-gnu
           execute_install_scripts: true
 
       - name: 下载 repo 工具
@@ -254,15 +254,6 @@ jobs:
           file "$DRIVER_SRC/touch_inject_hidden.ko"
 
       # ============================================================
-      #  编译远程控制客户端
-      # ============================================================
-      - name: 编译 remote_touch 客户端
-        run: |
-          cd "$GITHUB_WORKSPACE/touch_inject_hidden"
-          aarch64-linux-gnu-gcc -static -o remote_touch remote/client.c -lm
-          file remote_touch
-
-      # ============================================================
       #  上传产物
       # ============================================================
       - name: 上传 touch_inject_hidden.ko
@@ -270,9 +261,3 @@ jobs:
         with:
           name: touch_inject_hidden-6.1.128-ko
           path: touch_inject_hidden/kernel/touch_inject_hidden.ko
-
-      - name: 上传 remote_touch
-        uses: actions/upload-artifact@v4
-        with:
-          name: remote-touch-client
-          path: touch_inject_hidden/remote_touch
