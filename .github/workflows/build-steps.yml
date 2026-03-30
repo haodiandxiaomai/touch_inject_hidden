@@ -108,10 +108,8 @@ jobs:
             echo "=== Building TEST_STEP=$STEP ==="
 
             # 创建专用 Makefile
-            cat > "$SRC/Makefile" << MKEOF
-obj-m := test_step.o
-ccflags-y := -DTEST_STEP=$STEP
-MKEOF
+            echo "obj-m := test_step.o" > "$SRC/Makefile"
+            echo "ccflags-y := -DTEST_STEP=$STEP" >> "$SRC/Makefile"
 
             # 清理旧产物
             make -C "$KDIR" O="$BAZEL_OUT" M="$SRC" ARCH=arm64 clean 2>/dev/null || true
