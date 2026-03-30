@@ -1,0 +1,180 @@
+name: Build touch_inject_hidden.ko
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ANDROID_VERSION: "android14"
+      KERNEL_VERSION: "6.1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: touch_inject_hidden
+
+      - name: Free disk
+        uses: endersonmenezes/free-disk-space@v3
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+          remove_swap: true
+          remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
+          remove_packages_one_command: true
+          remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+          rm_cmd: "rmz"
+          rmz_version: "3.1.1"
+          testing: false
+
+      - name: Install deps
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves bc clang lld binutils-aarch64-linux-gnu
+          execute_install_scripts: true
+
+      - name: Download repo
+        run: |
+          mkdir -p ~/bin
+          curl -L https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
+          chmod +x ~/bin/repo
+          echo "~/bin" >> $GITHUB_PATH
+
+      - name: Download tools
+        run: |
+          git clone https://android.googlesource.com/kernel/prebuilts/build-tools -b main-kernel-build-2024 --depth 1 kernel-build-tools
+          git clone https://android.googlesource.com/platform/system/tools/mkbootimg -b main-kernel-build-2024 --depth 1 mkbootimg
+
+      - name: ccache
+        run: |
+          mkdir -p ~/.cache/bazel
+          ccache --max-size=2G
+          ccache --set-config=compression=true
+
+      - name: ccache cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: a14-6.1-ccache-hidden-v1
+          restore-keys: |
+            a14-6.1-ccache-
+
+      - name: Git config
+        run: |
+          git config --global user.name "BuildBot"
+          git config --global user.email "build@ci.local"
+
+      - name: Sync kernel
+        run: |
+          FB="${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}"
+          KR="$GITHUB_WORKSPACE/$FB"
+          mkdir -p "$KR"
+          cd "$KR"
+          repo init --depth=1 -u https://android.googlesource.com/kernel/manifest -b common-$FB --repo-rev=v2.16
+          RB=$(git ls-remote https://android.googlesource.com/kernel/common $FB 2>/dev/null || true)
+          if grep -q deprecated <<< "$RB" 2>/dev/null; then
+            sed -i "s/\"$FB\"/\"deprecated\/$FB\"/g" .repo/manifests/default.xml
+          fi
+          repo sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc)
+          echo "KERNEL_ROOT=$KR" >> $GITHUB_ENV
+
+      - name: Clone patches
+        run: |
+          cd $GITHUB_WORKSPACE
+          git clone https://github.com/ShirkNeko/susfs4ksu.git -b gki-android14-6.1 2>/dev/null || true
+          git clone https://github.com/ShirkNeko/SukiSU_patch.git 2>/dev/null || true
+
+      - name: Apply patches
+        run: |
+          cd $KERNEL_ROOT
+          DEFCONFIG=common/arch/arm64/configs/gki_defconfig
+          cp "$DEFCONFIG" "${DEFCONFIG}.orig"
+          if [ -d "$GITHUB_WORKSPACE/susfs4ksu" ]; then
+            for p in $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/50*.patch; do
+              [ -f "$p" ] && (patch -p1 --forward < "$p" || true)
+            done
+          fi
+          if [ -d "$GITHUB_WORKSPACE/SukiSU_patch" ]; then
+            for p in $GITHUB_WORKSPACE/SukiSU_patch/6.1/*.patch; do
+              [ -f "$p" ] && (patch -p1 --forward < "$p" || true)
+            done
+          fi
+          sed -i 's/-dirty//' common/scripts/setlocalversion 2>/dev/null || true
+          sed -i '/protected_exports_list.*android\/abi_gki_protected_exports_aarch64/d' common/BUILD.bazel 2>/dev/null || true
+          sed -i '/kmi_symbol_list_strict_mode/d' common/BUILD.bazel 2>/dev/null || true
+          rm -f common/android/abi_gki_protected_exports_*
+          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
+
+      - name: Build kernel
+        run: |
+          cd $KERNEL_ROOT
+          sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' common/build.config.gki.aarch64 2>/dev/null || true
+          sed -i '/MODULES_ORDER=android\/gki_aarch64_modules/d' common/build.config.gki.aarch64 2>/dev/null || true
+          sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' common/build.config.gki.aarch64 2>/dev/null || true
+          DEFCONFIG=common/arch/arm64/configs/gki_defconfig
+          FRAG="common/arch/arm64/configs/ksu.fragment"
+          diff "${DEFCONFIG}.orig" "$DEFCONFIG" | grep '^>' | sed 's/^> //; s/^[[:space:]]*//' > "$FRAG" || true
+          cp "${DEFCONFIG}.orig" "$DEFCONFIG"
+          tools/bazel build --disk_cache=$HOME/.cache/bazel --config=fast //common:kernel_aarch64_dist || exit 1
+          echo "Kernel built OK"
+          strings bazel-bin/common/kernel_aarch64/Image | grep 'Linux version' | head -1
+
+      - name: Build touch_inject_hidden.ko
+        run: |
+          cd $KERNEL_ROOT
+          BO="$KERNEL_ROOT/bazel-bin/common/kernel_aarch64"
+          echo "=== Extract headers ==="
+          mkdir -p /tmp/khdr
+          tar xzf $BO/out-dir-kernel-headers.tar.gz -C /tmp/khdr/
+          echo "=== Generate .config ==="
+          cd $KERNEL_ROOT/common
+          make ARCH=arm64 gki_defconfig
+          sed -i 's/CONFIG_KASAN=y/# CONFIG_KASAN is not set/' .config
+          sed -i 's/CONFIG_KASAN_INLINE=y/# CONFIG_KASAN_INLINE is not set/' .config
+          sed -i 's/CONFIG_KASAN_STACK=y/# CONFIG_KASAN_STACK is not set/' .config
+          echo "CONFIG_INPUT=y" >> .config
+          echo "CONFIG_INPUT_MISC=y" >> .config
+          make ARCH=arm64 CC=clang HOSTCC=gcc olddefconfig
+          mkdir -p include/generated
+          cp /tmp/khdr/include/generated/autoconf.h include/generated/autoconf.h
+          cp $BO/kernel_aarch64_Module.symvers Module.symvers
+          echo "=== Create module.lds ==="
+          mkdir -p scripts
+          printf '%s\n' 'SECTIONS' '{' '  /DISCARD/ : { *(.discard) *(.discard.*) }' '}' > scripts/module.lds
+          echo "=== Build module ==="
+          cd $GITHUB_WORKSPACE/touch_inject_hidden/kernel
+          sed -i 's/-fconserve-stack//g' $KERNEL_ROOT/common/Makefile 2>/dev/null || true
+          KDIR=$KERNEL_ROOT/common
+          cp /tmp/khdr/include/generated/autoconf.h $KDIR/include/generated/autoconf.h
+          cp $BO/kernel_aarch64_Module.symvers $KDIR/Module.symvers
+          mkdir -p $KDIR/include/uapi/asm
+          cp -r /tmp/khdr/include/uapi/asm/* $KDIR/include/uapi/asm/ 2>/dev/null || true
+          cp -r /tmp/khdr/include/asm/* $KDIR/include/asm/ 2>/dev/null || true
+          make -C $KDIR M=$PWD ARCH=arm64 LLVM=1 \
+            KCFLAGS="-Wno-error=unknown-warning-option -Wno-unknown-warning-option" modules
+          ls -la touch_inject_hidden.ko
+          file touch_inject_hidden.ko
+
+      - name: Build client
+        run: |
+          cd $GITHUB_WORKSPACE/touch_inject_hidden
+          aarch64-linux-gnu-gcc -static -o remote_touch remote/client.c -lm
+          file remote_touch
+
+      - name: Upload .ko
+        uses: actions/upload-artifact@v4
+        with:
+          name: touch_inject_hidden-ko
+          path: touch_inject_hidden/kernel/touch_inject_hidden.ko
+
+      - name: Upload client
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-touch-client
+          path: touch_inject_hidden/remote_touch
