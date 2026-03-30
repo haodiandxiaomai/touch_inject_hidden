@@ -1,10 +1,11 @@
 /*
  * main.c — touch_inject_hidden 内核模块入口
  *
- * 功能：
- *   1. 模块隐藏（/proc/modules, /sys/module, vmap_area）
- *   2. 线程隐藏
- *   3. 初始化触摸注入、自然模拟、反检测、远程控制
+ * 修复要点：
+ *   1. 移除 kobject_put — init 阶段调用会触发内核 panic
+ *   2. 隐藏操作放到 init 最后一步 — 只在全部初始化成功后才隐藏
+ *   3. 移除 hide_thread — 删除 kthread 会导致 kthread_stop 崩溃
+ *   4. 正确的 cleanup 顺序 — 与 init 相反
  */
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -13,7 +14,6 @@
 #include <linux/kprobes.h>
 #include <linux/vmalloc.h>
 #include <linux/list.h>
-#include <linux/kobject.h>
 #include <linux/sched.h>
 
 #include "io_struct.h"
@@ -26,10 +26,16 @@
 #define DRV_NAME "touch_inject_hidden"
 
 /* ============================================================
- *  模块隐藏
+ *  模块隐藏 — 安全版
+ *
+ *  策略：
+ *   - 只用 list_del 从 /proc/modules 摘除
+ *   - 从 vmap_area_list 摘除内存映射
+ *   - 不调用 kobject_put（init 阶段危险）
+ *   - 不删除线程（会导致 kthread_stop 崩溃）
+ *   - 隐藏不可逆，只在 init 最后执行
  * ============================================================ */
 
-/* vmap_area 结构 — 内部定义，不依赖头文件 */
 struct ad_vmap_area {
     unsigned long va_start;
     unsigned long va_end;
@@ -37,64 +43,45 @@ struct ad_vmap_area {
     struct list_head list;
 };
 
-static void hide_from_vmap(void)
-{
-    struct list_head *vmap_area_list;
-    struct ad_vmap_area *va;
-    unsigned long module_addr;
-
-    module_addr = (unsigned long)THIS_MODULE->core_layout.base;
-    if (!module_addr)
-        return;
-
-    vmap_area_list = (struct list_head *)
-        ad_lookup_symbol("vmap_area_list");
-    if (!vmap_area_list)
-        return;
-
-    list_for_each_entry(va, vmap_area_list, list) {
-        if (va->va_start <= module_addr && module_addr < va->va_end) {
-            list_del(&va->list);
-            pr_info(DRV_NAME": hidden from vmap_area_list\n");
-            break;
-        }
-    }
-}
-
-/* 从 /proc/modules 隐藏 */
-static void hide_from_proc_modules(void)
-{
-    /* 从 THIS_MODULE->list 摘除 */
-    list_del(&THIS_MODULE->list);
-    pr_info(DRV_NAME": hidden from /proc/modules\n");
-}
-
-/* 从 /sys/module 隐藏 */
-static void hide_from_sys_module(void)
-{
-    /* 删除 kobject */
-    kobject_put(&THIS_MODULE->mkobj.kobj);
-    pr_info(DRV_NAME": hidden from /sys/module\n");
-}
-
-/* 线程隐藏 — 从 task 链表摘除 */
-static void hide_thread(struct task_struct *task)
-{
-    if (!task) return;
-    list_del(&task->tasks);
-    pr_info(DRV_NAME": thread '%s' hidden\n", task->comm);
-}
-
-/* 完整隐藏 */
 static void do_hide(void)
 {
-    hide_from_proc_modules();
-    hide_from_sys_module();
-    hide_from_vmap();
+    struct list_head *vmap_list;
+    struct ad_vmap_area *va;
+    unsigned long base;
+
+    /* 1. 从 /proc/modules 摘除 */
+    list_del(&THIS_MODULE->list);
+    pr_info(DRV_NAME": hidden from /proc/modules\n");
+
+    /* 2. 从 vmap_area_list 摘除 */
+    base = (unsigned long)THIS_MODULE->core_layout.base;
+    if (base) {
+        vmap_list = (struct list_head *)ad_lookup_symbol("vmap_area_list");
+        if (vmap_list) {
+            list_for_each_entry(va, vmap_list, list) {
+                if (va->va_start <= base && base < va->va_end) {
+                    list_del(&va->list);
+                    pr_info(DRV_NAME": hidden from vmap_area_list\n");
+                    break;
+                }
+            }
+        }
+    }
+
+    /* 注意：不调用 kobject_put，不删除 /sys/module 条目
+     * 原因：init 阶段调用 kobject_put 会导致引用计数异常，
+     * 内核在 module_init 返回后可能访问已释放的 kobject，
+     * 导致 kernel panic。
+     *
+     * /sys/module/touch_inject_hidden 仍然可见，但:
+     * - /proc/modules 中不可见
+     * - vmap_area 中不可见
+     * - lsmod 看不到
+     */
 }
 
 /* ============================================================
- *  模块初始化/退出
+ *  模块初始化 — 安全版
  * ============================================================ */
 
 static int __init touch_hidden_init(void)
@@ -106,52 +93,58 @@ static int __init touch_hidden_init(void)
     /* 1. 初始化自然触摸模拟器 */
     ret = nt_init();
     if (ret) {
-        pr_err(DRV_NAME": nt_init failed: %d\n", ret);
+        pr_err(DRV_NAME": nt_init: %d\n", ret);
         return ret;
     }
 
-    /* 2. 初始化触摸注入（查找触摸屏 + slot 隔离） */
+    /* 2. 初始化触摸注入 */
     ret = inj_init();
     if (ret) {
-        pr_err(DRV_NAME": inj_init failed: %d\n", ret);
-        goto e1;
+        pr_err(DRV_NAME": inj_init: %d\n", ret);
+        goto err_nt;
     }
 
     /* 3. 初始化反检测层 */
     ret = ad_init(inj_ctx.dev);
     if (ret) {
-        pr_err(DRV_NAME": ad_init failed: %d\n", ret);
-        goto e2;
+        pr_err(DRV_NAME": ad_init: %d\n", ret);
+        goto err_inj;
     }
 
     /* 4. 启动 UDP 远程控制 */
     ret = net_start(rc_on_cmd, rc_on_mt_cmd, rc_on_config, NULL);
     if (ret) {
-        pr_err(DRV_NAME": net_start failed: %d\n", ret);
-        goto e3;
+        pr_err(DRV_NAME": net_start: %d\n", ret);
+        goto err_ad;
     }
 
-    /* 5. 隐藏模块 */
+    /*
+     * 5. 隐藏模块 — 最后一步
+     * 只有全部初始化成功后才隐藏
+     * 如果这里失败，模块仍然可见，可以正常卸载
+     */
     do_hide();
 
-    /* 6. 隐藏接收线程 */
-    if (net_ctx.thread)
-        hide_thread(net_ctx.thread);
-
-    pr_info(DRV_NAME": ready — hidden, listening on 127.0.0.1:39527\n");
+    pr_info(DRV_NAME": ready — listening on 127.0.0.1:39527\n");
     return 0;
 
-e3:
+/* 错误清理 — 按 init 相反顺序 */
+err_ad:
     ad_cleanup(inj_ctx.dev);
-e2:
+err_inj:
     inj_cleanup();
-e1:
+err_nt:
     nt_cleanup();
     return ret;
 }
 
+/* ============================================================
+ *  模块退出 — 安全版
+ * ============================================================ */
+
 static void __exit touch_hidden_exit(void)
 {
+    /* 按 init 相反顺序清理 */
     net_stop();
     ad_cleanup(inj_ctx.dev);
     inj_cleanup();
