@@ -129,6 +129,36 @@ jobs:
 
           ls -la "$OUT/"
 
+      - name: Build 5 inj test variants
+        run: |
+          KDIR="$KERNEL_ROOT/common"
+          CLANG_DIR="$KERNEL_ROOT/prebuilts/clang/host/linux-x86/clang-r487747c"
+          [ -x "$CLANG_DIR/bin/clang" ] || CLANG_DIR="/usr"
+          SRC="$GITHUB_WORKSPACE/project/kernel"
+          OUT="$GITHUB_WORKSPACE/project/output"
+          mkdir -p "$OUT"
+
+          for STEP in 1 2 3 4 5; do
+            echo "=== Building INJ_STEP=$STEP ==="
+
+            echo "obj-m := test_inj_steps.o" > "$SRC/Makefile"
+            echo "ccflags-y := -DINJ_STEP=$STEP -Wno-unused-function" >> "$SRC/Makefile"
+
+            make -C "$KDIR" O="$BAZEL_OUT" M="$SRC" ARCH=arm64 clean 2>/dev/null || true
+
+            env PATH="$CLANG_DIR/bin:$PATH" \
+              make -C "$KDIR" O="$BAZEL_OUT" M="$SRC" \
+                ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                CROSS_COMPILE=aarch64-linux-gnu- \
+                CLANG_TRIPLE=aarch64-linux-gnu- \
+                modules -j$(nproc)
+
+            cp "$SRC/test_inj_steps.ko" "$OUT/inj_step_${STEP}.ko"
+            echo "inj_step_${STEP}.ko: $(file $OUT/inj_step_${STEP}.ko)"
+          done
+
+          ls -la "$OUT/"
+
       - name: Upload test modules
         uses: actions/upload-artifact@v4
         with:
