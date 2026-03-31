@@ -321,7 +321,7 @@ static inline void inj_sync_frame(void)
         input_event(dev, EV_ABS, ABS_MT_SLOT, f->slot);
 
         /* 报告状态 */
-        /* 不用 input_mt_report_slot_state，直接写 tracking_id */\n        input_event(dev, EV_ABS, ABS_MT_TRACKING_ID, f->tracking_id);
+        /* 不用 input_mt_report_slot_state，直接写 tracking_id */
         input_event(dev, EV_ABS, ABS_MT_TRACKING_ID, f->tracking_id);
         input_event(dev, EV_ABS, ABS_MT_POSITION_X, f->x);
         input_event(dev, EV_ABS, ABS_MT_POSITION_Y, f->y);
@@ -350,11 +350,16 @@ static inline void inj_release_finger(int finger_idx)
     struct input_dev *dev = inj_ctx.dev;
     struct inj_finger *f = &inj_ctx.fingers[finger_idx];
     unsigned long flags;
+    int old_slot;
 
     if (!f->active || f->slot < 0)
         return;
 
     local_irq_save(flags);
+
+    old_slot = dev->absinfo[ABS_MT_SLOT].value;
+    if (dev->mt && dev->mt->num_slots < INJ_MAX_SLOTS)
+        dev->mt->num_slots = INJ_MAX_SLOTS;
 
     input_event(dev, EV_ABS, ABS_MT_SLOT, f->slot);
     input_event(dev, EV_ABS, ABS_MT_TRACKING_ID, -1);
@@ -366,8 +371,7 @@ static inline void inj_release_finger(int finger_idx)
     if (dev->mt)
         dev->mt->num_slots = inj_ctx.native_slots;
     input_event(dev, EV_ABS, ABS_MT_SLOT, old_slot);
-    if (any_active)
-        input_report_key(dev, BTN_TOUCH, 1);
+    inj_update_keys();
     input_sync(dev);
 
     local_irq_restore(flags);
@@ -501,7 +505,9 @@ static int inj_remote_down(s32 x, s32 y)
     pr_debug("inject: remote_down finger=%d slot=%d tid=%d (%d,%d)\n",
              finger_idx, slot, f->tracking_id, x, y);
 
+    inj_unlock_keys(inj_ctx.dev);
     inj_sync_frame();
+    inj_lock_keys(inj_ctx.dev);
 
     return finger_idx;
 }
