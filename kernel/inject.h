@@ -172,14 +172,8 @@ static int inj_handler_connect(struct input_handler *handler, struct input_dev *
     }
 
     /* Grab！独占设备 */
-    err = input_grab_device(handle);
-    if (err) {
-        input_close_device(handle);
-        input_unregister_handle(handle);
-        kfree(handle);
-        return err;
-    }
-
+    /* 直接设置 dev->grab */
+    rcu_assign_pointer(dev->grab, handle);
     inj.handle = handle;
     pr_info("inject: grabbed '%s'\n", dev->name ?: "?");
     return 0;
@@ -187,7 +181,7 @@ static int inj_handler_connect(struct input_handler *handler, struct input_dev *
 
 static void inj_handler_disconnect(struct input_handle *handle)
 {
-    input_release_device(handle);
+    RCU_INIT_POINTER(handle->dev->grab, NULL);
     input_close_device(handle);
     input_unregister_handle(handle);
     kfree(handle);
