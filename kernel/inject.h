@@ -181,10 +181,21 @@ static inline s32 inj_alloc_tracking_id(void)
 /* ============================================================
  *  mt 初始化
  * ============================================================ */
+/*
+ * inj_init_mt: 劫持 mt 结构，让真实驱动看不到虚拟 slot
+ *
+ * 关键：
+ *   - 分配更大的 mt（实际有 TOTAL_SLOTS 个 slot 空间）
+ *   - mt->num_slots 保持 native（真实驱动只处理 0..native-1）
+ *   - 扩展 ABS_MT_SLOT 报告范围
+ *   - 虚拟触摸用 native..TOTAL_SLOTS-1，永远不会被 input_mt_sync_frame 清掉
+ */
 static inline int inj_init_mt(struct input_dev *dev)
 {
     struct input_mt *mt = dev->mt;
-    int native;
+    struct input_mt *new_mt;
+    int native, total;
+    size_t size;
 
     if (!mt) return -EINVAL;
 
@@ -192,48 +203,41 @@ static inline int inj_init_mt(struct input_dev *dev)
     inj_ctx.native_slots = native;
     inj_ctx.next_tracking_id = 1;
 
-    if (native >= INJ_MAX_SLOTS) {
-        pr_info("inject: native %d slots, no modification needed\n", native);
-        return 0;
+    /* 总 slot = 原生 + 虚拟，最少 INJ_MAX_SLOTS */
+    total = native + INJ_MAX_VIRTUAL;
+    if (total < INJ_MAX_SLOTS)
+        total = INJ_MAX_SLOTS;
+
+    /* 分配新的 mt */
+    size = sizeof(struct input_mt) + total * sizeof(struct input_mt_slot);
+    new_mt = kzalloc(size, GFP_KERNEL);
+    if (!new_mt) return -ENOMEM;
+
+    /* 复制旧数据 */
+    new_mt->trkid = mt->trkid;
+    new_mt->num_slots = native;  /* ← 真实驱动永远只看到 native 个！ */
+    new_mt->flags = (mt->flags & ~INPUT_MT_POINTER) | INPUT_MT_DIRECT;
+    new_mt->flags &= ~INPUT_MT_DROP_UNUSED;
+    new_mt->frame = mt->frame;
+    memcpy(new_mt->slots, mt->slots, native * sizeof(struct input_mt_slot));
+
+    /* red 矩阵 */
+    if (mt->red) {
+        new_mt->red = kzalloc(total * total * sizeof(int), GFP_KERNEL);
+        if (!new_mt->red) { kfree(new_mt); return -ENOMEM; }
     }
 
-    if (native >= 8) {
-        input_set_abs_params(dev, ABS_MT_SLOT, 0, INJ_MAX_SLOTS - 1,
-                            dev->absinfo[ABS_MT_SLOT].fuzz,
-                            dev->absinfo[ABS_MT_SLOT].resolution);
-        pr_info("inject: slot range %d->%d\n", native, INJ_MAX_SLOTS);
-        return 0;
-    }
+    /* 替换 */
+    dev->mt = new_mt;
 
-    /* <8 slot: 扩容 mt */
-    {
-        struct input_mt *new_mt;
-        size_t size = sizeof(struct input_mt) +
-                      INJ_MAX_SLOTS * sizeof(struct input_mt_slot);
+    /* 扩展报告范围 */
+    input_set_abs_params(dev, ABS_MT_SLOT, 0, total - 1,
+                        dev->absinfo[ABS_MT_SLOT].fuzz,
+                        dev->absinfo[ABS_MT_SLOT].resolution);
 
-        new_mt = kmalloc(size, GFP_KERNEL);
-        if (!new_mt) return -ENOMEM;
-
-        memset(new_mt, 0, size);
-        new_mt->trkid = mt->trkid;
-        new_mt->num_slots = native;
-        new_mt->flags = (mt->flags & ~INPUT_MT_POINTER) | INPUT_MT_DIRECT;
-        new_mt->frame = mt->frame;
-        memcpy(new_mt->slots, mt->slots, native * sizeof(struct input_mt_slot));
-
-        if (mt->red) {
-            new_mt->red = kmalloc(INJ_MAX_SLOTS * INJ_MAX_SLOTS * sizeof(int), GFP_KERNEL);
-            if (!new_mt->red) { kfree(new_mt); return -ENOMEM; }
-            memset(new_mt->red, 0, INJ_MAX_SLOTS * INJ_MAX_SLOTS * sizeof(int));
-        }
-
-        dev->mt = new_mt;
-        input_set_abs_params(dev, ABS_MT_SLOT, 0, INJ_MAX_SLOTS - 1,
-                            dev->absinfo[ABS_MT_SLOT].fuzz,
-                            dev->absinfo[ABS_MT_SLOT].resolution);
-        pr_info("inject: mt expanded %d->%d\n", native, INJ_MAX_SLOTS);
-        return 0;
-    }
+    pr_info("inject: mt hijacked %d slots -> %d total (real sees %d)\n",
+            native, total, native);
+    return 0;
 }
 
 /* ============================================================
