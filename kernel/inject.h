@@ -40,6 +40,37 @@
 
 #include "natural_touch.h"
 
+/* ===== CFI/KCFI bypass for kallsyms_lookup_name (参考 lsdriver/export_fun.h) ===== */
+typedef unsigned long (*kln_t)(const char *name);
+
+#ifdef __clang__
+__attribute__((no_sanitize("cfi")))
+__attribute__((no_sanitize("kcfi")))
+#endif
+static unsigned long _cfi_call(unsigned long addr, const char *name)
+{
+    kln_t fn = (kln_t)addr;
+    return fn(name);
+}
+
+static unsigned long do_kallsyms_lookup_name(const char *name)
+{
+    static unsigned long kln_addr = 0;
+    struct kprobe kp = {0};
+    int ret;
+
+    if (!kln_addr) {
+        kp.symbol_name = "kallsyms_lookup_name";
+        ret = register_kprobe(&kp);
+        if (ret < 0) return 0;
+        kln_addr = (unsigned long)kp.addr;
+        unregister_kprobe(&kp);
+        if (!kln_addr) return 0;
+    }
+    return _cfi_call(kln_addr, name);
+}
+
+
 /* 配置 */
 #define INJ_MAX_SLOTS        10   /* 总 slot 数 0-9 */
 #define INJ_MAX_VIRTUAL       2   /* 最多 2 个远程手指 */
@@ -336,8 +367,8 @@ static int inj_init(void)
 {
     struct input_dev *found = NULL;
     struct class *input_class = NULL;
-    void *kln_addr;
-    struct kprobe kp = { .symbol_name = "kallsyms_lookup_name" };
+
+
     int ret, i;
 
     if (inj_ctx.initialized) return 0;
@@ -351,15 +382,12 @@ static int inj_init(void)
         inj_ctx.fingers[i].tracking_id = -1;
     }
 
-    /* 获取 input_class */
-    kln_addr = NULL;
-    if (register_kprobe(&kp) == 0) {
-        kln_addr = (void *)((unsigned long)kp.addr + kp.offset);
-        unregister_kprobe(&kp);
+    /* 获取 input_class (CFI/KCFI bypass, 参考 lsdriver) */
+    {
+        unsigned long kln = do_kallsyms_lookup_name("input_class");
+        if (!kln) return -ENODEV;
+        input_class = (struct class *)kln;
     }
-    if (kln_addr)
-        input_class = ((struct class *(*)(const char *))kln_addr)("input_class");
-    if (!input_class) return -ENODEV;
 
     class_for_each_device(input_class, NULL, &found, inj_match_ts);
     if (!found) return -ENODEV;
