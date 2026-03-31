@@ -109,7 +109,7 @@ jobs:
 
             # 创建专用 Makefile
             echo "obj-m := test_step.o" > "$SRC/Makefile"
-            echo "ccflags-y := -DTEST_STEP=$STEP" >> "$SRC/Makefile"
+            echo "ccflags-y := -DTEST_STEP=$STEP -Wno-unused-function" >> "$SRC/Makefile"
 
             # 清理旧产物
             make -C "$KDIR" O="$BAZEL_OUT" M="$SRC" ARCH=arm64 clean 2>/dev/null || true
