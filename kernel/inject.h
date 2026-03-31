@@ -149,18 +149,15 @@ static inline bool inj_slot_occupied_by_remote(int slot)
  * 优先选高位 slot（远离物理手指的活动区域）
  * 如果高位满了，往低位扫描
  */
+/* 预分配: finger 0 -> slot 8, finger 1 -> slot 9 */
 static inline int inj_alloc_slot(void)
 {
-    int i;
-
-    /* 优先从高位往低位扫描（slot 9 → 0） */
-    for (i = INJ_MAX_SLOTS - 1; i >= 0; i--) {
-        if (!inj_slot_occupied_by_physical(i) &&
-            !inj_slot_occupied_by_remote(i))
-            return i;
-    }
-
-    return -1; /* 全满 */
+    static int next_slot = INJ_MAX_SLOTS - 2;
+    int slot = next_slot;
+    next_slot++;
+    if (next_slot >= INJ_MAX_SLOTS)
+        next_slot = INJ_MAX_SLOTS - 2;
+    return slot;
 }
 
 /*
@@ -193,49 +190,25 @@ static inline int inj_init_mt(struct input_dev *dev)
     inj_ctx.next_tracking_id = 1;
 
     if (native >= INJ_MAX_SLOTS) {
-        /* 原生 10+ slot，不需要任何修改 */
-        pr_info("inject: native %d slots, no modification needed\n", native);
+        pr_info("inject: native %d slots, no mod needed\n", native);
         return 0;
     }
 
-    if (native >= 8) {
-        /* 原生 8-9 slot，只扩展范围 */
-        input_set_abs_params(dev, ABS_MT_SLOT, 0, INJ_MAX_SLOTS - 1,
-                            dev->absinfo[ABS_MT_SLOT].fuzz,
-                            dev->absinfo[ABS_MT_SLOT].resolution);
-        pr_info("inject: slot range %d->%d\n", native, INJ_MAX_SLOTS);
-        return 0;
+    /* 只扩展报告范围，不动 mt 内部 */
+    input_set_abs_params(dev, ABS_MT_SLOT, 0, INJ_MAX_SLOTS - 1,
+                        dev->absinfo[ABS_MT_SLOT].fuzz,
+                        dev->absinfo[ABS_MT_SLOT].resolution);
+
+    /* 禁用 POINTER，防止内核自动更新按键 */
+    if (mt->flags & INPUT_MT_POINTER) {
+        mt->flags &= ~INPUT_MT_POINTER;
+        mt->flags |= INPUT_MT_DIRECT;
     }
 
-    /* 原生 <8 slot，需要扩容 mt */
-    {
-        struct input_mt *new_mt;
-        size_t size = sizeof(struct input_mt) +
-                      INJ_MAX_SLOTS * sizeof(struct input_mt_slot);
-
-        new_mt = kmalloc(size, GFP_KERNEL);
-        if (!new_mt) return -ENOMEM;
-
-        memset(new_mt, 0, size);
-        new_mt->trkid = mt->trkid;
-        new_mt->num_slots = native;
-        new_mt->flags = (mt->flags & ~INPUT_MT_POINTER) | INPUT_MT_DIRECT;
-        new_mt->frame = mt->frame;
-        memcpy(new_mt->slots, mt->slots, native * sizeof(struct input_mt_slot));
-
-        if (mt->red) {
-            new_mt->red = kmalloc(INJ_MAX_SLOTS * INJ_MAX_SLOTS * sizeof(int), GFP_KERNEL);
-            if (!new_mt->red) { kfree(new_mt); return -ENOMEM; }
-            memset(new_mt->red, 0, INJ_MAX_SLOTS * INJ_MAX_SLOTS * sizeof(int));
-        }
-
-        dev->mt = new_mt;
-        input_set_abs_params(dev, ABS_MT_SLOT, 0, INJ_MAX_SLOTS - 1,
-                            dev->absinfo[ABS_MT_SLOT].fuzz,
-                            dev->absinfo[ABS_MT_SLOT].resolution);
-        pr_info("inject: mt expanded %d->%d\n", native, INJ_MAX_SLOTS);
-        return 0;
-    }
+    pr_info("inject: native %d slots, report 0-%d, virtual on %d,%d\n",
+            native, INJ_MAX_SLOTS - 1,
+            INJ_MAX_SLOTS - 2, INJ_MAX_SLOTS - 1);
+    return 0;
 }
 
 /* ============================================================
@@ -300,11 +273,16 @@ static inline void inj_sync_frame(void)
 {
     struct input_dev *dev = inj_ctx.dev;
     unsigned long flags;
-    int i;
+    int i, old_slot;
+    bool any_active = false;
 
     if (!dev->absinfo) return;
 
     local_irq_save(flags);
+
+    old_slot = dev->absinfo[ABS_MT_SLOT].value;
+    if (dev->mt && dev->mt->num_slots <= INJ_MAX_SLOTS - 2)
+        dev->mt->num_slots = INJ_MAX_SLOTS;
 
     for (i = 0; i < INJ_MAX_VIRTUAL; i++) {
         struct inj_finger *f = &inj_ctx.fingers[i];
@@ -312,11 +290,13 @@ static inline void inj_sync_frame(void)
         if (!f->active || f->slot < 0)
             continue;
 
+        any_active = true;
+
         /* 选中远程分配的 slot */
         input_event(dev, EV_ABS, ABS_MT_SLOT, f->slot);
 
         /* 报告状态 */
-        input_mt_report_slot_state(dev, MT_TOOL_FINGER, true);
+        /* skip input_mt_report_slot_state to avoid polluting real slots */
         input_event(dev, EV_ABS, ABS_MT_TRACKING_ID, f->tracking_id);
         input_event(dev, EV_ABS, ABS_MT_POSITION_X, f->x);
         input_event(dev, EV_ABS, ABS_MT_POSITION_Y, f->y);
@@ -329,7 +309,11 @@ static inline void inj_sync_frame(void)
             input_event(dev, EV_ABS, ABS_MT_WIDTH_MAJOR, f->area + 2);
     }
 
-    inj_update_keys();
+    if (dev->mt)
+        dev->mt->num_slots = inj_ctx.native_slots;
+    input_event(dev, EV_ABS, ABS_MT_SLOT, old_slot);
+    if (any_active)
+        input_report_key(dev, BTN_TOUCH, 1);
     input_sync(dev);
 
     local_irq_restore(flags);
@@ -354,7 +338,11 @@ static inline void inj_release_finger(int finger_idx)
     f->slot = -1;
     f->tracking_id = -1;
 
-    inj_update_keys();
+    if (dev->mt)
+        dev->mt->num_slots = inj_ctx.native_slots;
+    input_event(dev, EV_ABS, ABS_MT_SLOT, old_slot);
+    if (any_active)
+        input_report_key(dev, BTN_TOUCH, 1);
     input_sync(dev);
 
     local_irq_restore(flags);
@@ -488,9 +476,7 @@ static int inj_remote_down(s32 x, s32 y)
     pr_debug("inject: remote_down finger=%d slot=%d tid=%d (%d,%d)\n",
              finger_idx, slot, f->tracking_id, x, y);
 
-    inj_unlock_keys(inj_ctx.dev);
     inj_sync_frame();
-    inj_lock_keys(inj_ctx.dev);
 
     return finger_idx;
 }
