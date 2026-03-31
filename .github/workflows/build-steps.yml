@@ -133,4 +133,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: step-test-modules
-          path: output/
+          path: project/output/
