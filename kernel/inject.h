@@ -1,8 +1,10 @@
 /*
- * inject.h — 触摸注入核心（全拦截共存版 v2）
+ * inject.h — 触摸注入核心（handler grab 共存版）
  *
- * 拦截 input_pass_values(struct input_dev *dev, struct input_value *vals, unsigned int count)
- * 吞掉真实驱动输出，合并虚拟触摸后统一输出
+ * 方案：注册 input_handler，grab 触摸屏设备
+ *   - grab 后，所有真实事件送到我们的 handler，Android 看不到
+ *   - 我们在 handler 里读取真实触摸状态，合并虚拟触摸，统一输出
+ *   - 不用 kprobe，不用猜函数签名，用内核标准 API
  */
 #ifndef _INJECT_H
 #define _INJECT_H
@@ -12,7 +14,6 @@
 #include <linux/input.h>
 #include <linux/input/mt.h>
 #include <linux/device.h>
-#include <linux/kprobes.h>
 
 #include "natural_touch.h"
 
@@ -48,10 +49,9 @@ static unsigned long do_kallsyms_lookup_name(const char *name)
 
 /* ===== 配置 ===== */
 #define INJ_MAX_SLOTS    20
-#define INJ_MAX_REAL     10
 #define INJ_MAX_VIRTUAL  10
 
-/* ===== 数据结构 ===== */
+/* ===== 虚拟手指 ===== */
 struct inj_touch {
     bool active;
     s32  tracking_id;
@@ -62,70 +62,48 @@ struct inj_touch {
 
 static struct {
     struct input_dev *dev;
-    bool intercepting;    /* 是否正在拦截（防止递归） */
+    struct input_handle *handle;
     bool initialized;
     int native_slots;
     s32 next_tid;
 
-    /* 虚拟触摸 buffer */
     struct inj_touch virt[INJ_MAX_VIRTUAL];
-
-    /* 当前帧的真实触摸（从 mt 读取）*/
-    struct inj_touch real[INJ_MAX_REAL];
-    int real_count;
-
     spinlock_t lock;
 } inj;
 
-/* ===== 查找触摸屏 ===== */
-static int inj_match_ts(struct device *dev, void *data)
-{
-    struct input_dev **out = data;
-    struct input_dev *id = to_input_dev(dev);
-
-    if (test_bit(EV_ABS, id->evbit) &&
-        test_bit(ABS_MT_SLOT, id->absbit) &&
-        test_bit(BTN_TOUCH, id->keybit) &&
-        id->mt) {
-        *out = id;
-        return 1;
-    }
-    return 0;
-}
-
-/* ===== 统一输出 ===== */
+/* ===== 合并输出 ===== */
 /*
- * emit_frame: 从 mt 读取真实触摸状态，合并虚拟触摸，统一输出
- * 调用时必须确保 inj.intercepting = true（防止递归）
+ * 在 handler 的 event 回调里调用（dev->event_lock 已持有）
+ * 读取 mt 真实状态 + 合并虚拟触摸 + 统一输出
  */
-static void emit_frame(struct input_dev *dev)
+static void inj_emit_merged(struct input_dev *dev)
 {
     int i, slot = 0, total = 0;
 
-    /* 1. 从 mt 读取真实触摸 */
-    if (dev->mt) {
-        for (i = 0; i < dev->mt->num_slots && i < INJ_MAX_REAL; i++) {
-            s32 tid = input_mt_get_value(&dev->mt->slots[i], ABS_MT_TRACKING_ID);
-            if (tid != -1) {
-                input_event(dev, EV_ABS, ABS_MT_SLOT, slot);
-                input_event(dev, EV_ABS, ABS_MT_TRACKING_ID, tid);
-                input_event(dev, EV_ABS, ABS_MT_POSITION_X,
-                    input_mt_get_value(&dev->mt->slots[i], ABS_MT_POSITION_X));
-                input_event(dev, EV_ABS, ABS_MT_POSITION_Y,
-                    input_mt_get_value(&dev->mt->slots[i], ABS_MT_POSITION_Y));
-                if (test_bit(ABS_MT_PRESSURE, dev->absbit))
-                    input_event(dev, EV_ABS, ABS_MT_PRESSURE,
-                        input_mt_get_value(&dev->mt->slots[i], ABS_MT_PRESSURE));
-                if (test_bit(ABS_MT_TOUCH_MAJOR, dev->absbit))
-                    input_event(dev, EV_ABS, ABS_MT_TOUCH_MAJOR,
-                        input_mt_get_value(&dev->mt->slots[i], ABS_MT_TOUCH_MAJOR));
-                slot++;
-                total++;
-            }
+    if (!dev->mt) return;
+
+    /* 1. 真实触摸（从 mt 读取）*/
+    for (i = 0; i < dev->mt->num_slots; i++) {
+        s32 tid = input_mt_get_value(&dev->mt->slots[i], ABS_MT_TRACKING_ID);
+        if (tid != -1) {
+            input_event(dev, EV_ABS, ABS_MT_SLOT, slot);
+            input_event(dev, EV_ABS, ABS_MT_TRACKING_ID, tid);
+            input_event(dev, EV_ABS, ABS_MT_POSITION_X,
+                input_mt_get_value(&dev->mt->slots[i], ABS_MT_POSITION_X));
+            input_event(dev, EV_ABS, ABS_MT_POSITION_Y,
+                input_mt_get_value(&dev->mt->slots[i], ABS_MT_POSITION_Y));
+            if (test_bit(ABS_MT_PRESSURE, dev->absbit))
+                input_event(dev, EV_ABS, ABS_MT_PRESSURE,
+                    input_mt_get_value(&dev->mt->slots[i], ABS_MT_PRESSURE));
+            if (test_bit(ABS_MT_TOUCH_MAJOR, dev->absbit))
+                input_event(dev, EV_ABS, ABS_MT_TOUCH_MAJOR,
+                    input_mt_get_value(&dev->mt->slots[i], ABS_MT_TOUCH_MAJOR));
+            slot++;
+            total++;
         }
     }
 
-    /* 2. 追加虚拟触摸 */
+    /* 2. 虚拟触摸 */
     for (i = 0; i < INJ_MAX_VIRTUAL; i++) {
         if (inj.virt[i].active) {
             input_event(dev, EV_ABS, ABS_MT_SLOT, slot);
@@ -148,49 +126,108 @@ static void emit_frame(struct input_dev *dev)
     input_sync(dev);
 }
 
-/* ===== kprobe 拦截 input_pass_values =====
- *
- * input_pass_values(struct input_dev *dev, struct input_value *vals, unsigned int count)
- *
- * ARM64: x0=dev, x1=vals, x2=count
- * x86_64: rdi=dev, rsi=vals, rdx=count
+/* ===== Handler event 回调 ===== */
+/*
+ * grab 后，真实驱动的所有事件都送到这里
+ * 我们吞掉原始事件，自己重新输出合并后的帧
  */
-static int handler_pre_input(struct kprobe *p, struct pt_regs *regs)
+static void inj_handler_event(struct input_handle *handle,
+                               unsigned int type, unsigned int code, int value)
 {
-    struct input_dev *dev;
-
-    if (!inj.initialized)
-        return 0;
-
-    /* 防止递归：emit_frame 内调 input_event → input_pass_values */
-    if (inj.intercepting)
-        return 0;
-
-#ifdef CONFIG_ARM64
-    dev = (struct input_dev *)regs->regs[0];
-#elif defined(CONFIG_X86_64)
-    dev = (struct input_dev *)regs->di;
-#else
-    return 0;
-#endif
-
-    if (dev != inj.dev)
-        return 0; /* 非目标设备，放行 */
-
-    /* 拦截！吞掉真实驱动的输出 */
-    inj.intercepting = true;
-    emit_frame(dev);
-    inj.intercepting = false;
-
-    /* 跳过原始 input_pass_values */
-    regs_set_return_value(regs, 0);
-    return 1;
+    /* 只在 EV_SYN 时输出合并帧 */
+    if (type == EV_SYN)
+        inj_emit_merged(handle->dev);
+    /* 其他事件全部吞掉 */
 }
 
-static struct kprobe kp_input = {
-    .symbol_name = "input_pass_values",
-    .pre_handler = handler_pre_input,
+/* ===== Handler 定义 ===== */
+static int inj_handler_connect(struct input_handler *handler, struct input_dev *dev,
+                                const struct input_device_id *id)
+{
+    struct input_handle *handle;
+    int err;
+
+    if (dev != inj.dev)
+        return -ENODEV;
+
+    handle = kzalloc(sizeof(*handle), GFP_KERNEL);
+    if (!handle)
+        return -ENOMEM;
+
+    handle->dev = dev;
+    handle->handler = handler;
+    handle->name = "inj_grab";
+
+    err = input_register_handle(handle);
+    if (err) {
+        kfree(handle);
+        return err;
+    }
+
+    err = input_open_device(handle);
+    if (err) {
+        input_unregister_handle(handle);
+        kfree(handle);
+        return err;
+    }
+
+    /* Grab！独占设备 */
+    err = input_grab_device(handle);
+    if (err) {
+        input_close_device(handle);
+        input_unregister_handle(handle);
+        kfree(handle);
+        return err;
+    }
+
+    inj.handle = handle;
+    pr_info("inject: grabbed '%s'\n", dev->name ?: "?");
+    return 0;
+}
+
+static void inj_handler_disconnect(struct input_handle *handle)
+{
+    input_release_device(handle);
+    input_close_device(handle);
+    input_unregister_handle(handle);
+    kfree(handle);
+
+    if (inj.handle == handle)
+        inj.handle = NULL;
+}
+
+static const struct input_device_id inj_handler_ids[] = {
+    {
+        .flags = INPUT_DEVICE_ID_MATCH_EVBIT | INPUT_DEVICE_ID_MATCH_ABSBIT,
+        .evbit = { BIT_MASK(EV_ABS) },
+        .absbit = { BIT_MASK(ABS_MT_SLOT) },
+    },
+    { },
 };
+
+static struct input_handler inj_handler = {
+    .event      = inj_handler_event,
+    .connect    = inj_handler_connect,
+    .disconnect = inj_handler_disconnect,
+    .name       = "touch_inject",
+    .id_table   = inj_handler_ids,
+};
+
+/* ===== 查找触摸屏 ===== */
+static int inj_match_ts(struct device *dev, void *data)
+{
+    struct input_dev **out = data;
+    struct input_dev *id = to_input_dev(dev);
+
+    if (test_bit(EV_ABS, id->evbit) &&
+        test_bit(ABS_MT_SLOT, id->absbit) &&
+        test_bit(BTN_TOUCH, id->keybit) &&
+        id->mt) {
+        *out = id;
+        return 1;
+    }
+    return 0;
+}
 
 /* ===== 初始化 ===== */
 static int inj_init(void)
@@ -222,15 +259,15 @@ static int inj_init(void)
                         found->absinfo[ABS_MT_SLOT].fuzz,
                         found->absinfo[ABS_MT_SLOT].resolution);
 
-    /* 注册拦截 kprobe */
-    ret = register_kprobe(&kp_input);
+    /* 注册 handler（会自动 connect + grab） */
+    ret = input_register_handler(&inj_handler);
     if (ret) {
-        pr_err("inject: kprobe on input_pass_values failed: %d\n", ret);
+        pr_err("inject: input_register_handler failed: %d\n", ret);
         return ret;
     }
 
     inj.initialized = true;
-    pr_info("inject: '%s' %dx%d native=%d, intercepting input_pass_values\n",
+    pr_info("inject: '%s' %dx%d native=%d, handler grab mode\n",
             found->name ?: "?",
             found->absinfo[ABS_MT_POSITION_X].maximum,
             found->absinfo[ABS_MT_POSITION_Y].maximum,
@@ -244,7 +281,7 @@ static void inj_cleanup(void)
     int i;
     if (!inj.initialized) return;
 
-    unregister_kprobe(&kp_input);
+    input_unregister_handler(&inj_handler);
 
     for (i = 0; i < INJ_MAX_VIRTUAL; i++)
         inj.virt[i].active = false;
