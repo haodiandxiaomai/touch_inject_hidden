@@ -23,8 +23,22 @@
 typedef unsigned long (*kln_t)(const char *name);
 
 /* 配置 */
-#define INJ_MAX_SLOTS        10   /* 总 slot 数 0-9 */
+#define INJ_MAX_SLOTS        20   /* 总 slot 数: 0-9 虚拟, 10-19 物理重映射 */
+#define INJ_VIRT_MAX         10   /* 虚拟手指最多用 slot 0-9 */
 #define INJ_MAX_VIRTUAL      10   /* 最多 10 个远程手指 */
+
+/* nat_filter 防重入：注入调用前 +1，调用后 -1 */
+static int nf_depth;
+
+/* 安全的 input_event 调用：跳过 nat_filter 的 kprobe 处理 */
+static inline void inj_input_event(struct input_dev *dev,
+                                    unsigned int type,
+                                    unsigned int code, int value)
+{
+    nf_depth++;
+    input_event(dev, type, code, value);
+    nf_depth--;
+}
 
 #ifdef __clang__
 __attribute__((no_sanitize("cfi")))
@@ -111,7 +125,8 @@ static inline bool inj_slot_occupied_by_remote(int slot)
 static inline int inj_alloc_slot(void)
 {
     int i;
-    for (i = INJ_MAX_SLOTS - 1; i >= 0; i--) {
+    /* 虚拟手指只从 0..INJ_VIRT_MAX-1 分配 */
+    for (i = INJ_VIRT_MAX - 1; i >= 0; i--) {
         if (!inj_slot_occupied_by_physical(i) &&
             !inj_slot_occupied_by_remote(i))
             return i;
@@ -238,17 +253,17 @@ static inline void inj_sync_frame(void)
 
         any_active = true;
 
-        input_event(dev, EV_ABS, ABS_MT_SLOT, f->slot);
-        input_event(dev, EV_ABS, ABS_MT_TRACKING_ID, f->tracking_id);
-        input_event(dev, EV_ABS, ABS_MT_POSITION_X, f->x);
-        input_event(dev, EV_ABS, ABS_MT_POSITION_Y, f->y);
+        inj_input_event(dev, EV_ABS, ABS_MT_SLOT, f->slot);
+        inj_input_event(dev, EV_ABS, ABS_MT_TRACKING_ID, f->tracking_id);
+        inj_input_event(dev, EV_ABS, ABS_MT_POSITION_X, f->x);
+        inj_input_event(dev, EV_ABS, ABS_MT_POSITION_Y, f->y);
 
         if (test_bit(ABS_MT_PRESSURE, dev->absbit))
-            input_event(dev, EV_ABS, ABS_MT_PRESSURE, f->pressure);
+            inj_input_event(dev, EV_ABS, ABS_MT_PRESSURE, f->pressure);
         if (test_bit(ABS_MT_TOUCH_MAJOR, dev->absbit))
-            input_event(dev, EV_ABS, ABS_MT_TOUCH_MAJOR, f->area);
+            inj_input_event(dev, EV_ABS, ABS_MT_TOUCH_MAJOR, f->area);
         if (test_bit(ABS_MT_WIDTH_MAJOR, dev->absbit))
-            input_event(dev, EV_ABS, ABS_MT_WIDTH_MAJOR, f->area + 2);
+            inj_input_event(dev, EV_ABS, ABS_MT_WIDTH_MAJOR, f->area + 2);
     }
 
     if (any_active)
@@ -269,8 +284,8 @@ static inline void inj_release_finger(int finger_idx)
 
     local_irq_save(flags);
 
-    input_event(dev, EV_ABS, ABS_MT_SLOT, f->slot);
-    input_event(dev, EV_ABS, ABS_MT_TRACKING_ID, -1);
+    inj_input_event(dev, EV_ABS, ABS_MT_SLOT, f->slot);
+    inj_input_event(dev, EV_ABS, ABS_MT_TRACKING_ID, -1);
 
     f->active = false;
     f->slot = -1;

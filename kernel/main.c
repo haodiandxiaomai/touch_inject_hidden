@@ -13,6 +13,7 @@
 #include "anti_detect.h"
 #include "network.h"
 #include "remote_control.h"
+#include "nat_filter.h"
 
 #define DRV_NAME "touch_inject_hidden"
 
@@ -46,17 +47,27 @@ static int __init touch_hidden_init(void)
     }
     pr_info(DRV_NAME": ad_init OK\n");
 
+    /* 3.5 物理事件 slot 过滤器 */
+    ret = nf_init(inj_ctx.dev);
+    if (ret) {
+        pr_err(DRV_NAME": nf_init: %d\n", ret);
+        goto err_ad;
+    }
+    pr_info(DRV_NAME": nf_init OK\n");
+
     /* 4. UDP 远程控制 */
     ret = net_start(rc_on_cmd, rc_on_mt_cmd, rc_on_config, NULL);
     if (ret) {
         pr_err(DRV_NAME": net_start: %d\n", ret);
-        goto err_ad;
+        goto err_nf;
     }
     pr_info(DRV_NAME": net_start OK\n");
 
     pr_info(DRV_NAME": ready — listening on 127.0.0.1:39527\n");
     return 0;
 
+err_nf:
+    nf_cleanup();
 err_ad:
     ad_cleanup(inj_ctx.dev);
 err_inj:
@@ -69,6 +80,7 @@ err_nt:
 static void __exit touch_hidden_exit(void)
 {
     net_stop();
+    nf_cleanup();
     ad_cleanup(inj_ctx.dev);
     inj_cleanup();
     nt_cleanup();
