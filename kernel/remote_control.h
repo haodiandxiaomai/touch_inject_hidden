@@ -9,7 +9,7 @@
 #include "natural_touch.h"
 
 /* 远程手指映射：remote_id → finger_idx */
-static int rc_finger_map[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+static int rc_finger_map[10] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
 
 /* 单点命令（兼容） */
 static void rc_on_cmd(enum remote_cmd cmd, s32 x, s32 y, void *data)
@@ -26,7 +26,7 @@ static void rc_on_cmd(enum remote_cmd cmd, s32 x, s32 y, void *data)
 static void rc_on_mt_cmd(enum remote_cmd cmd, u32 finger_id,
                           s32 x, s32 y, void *data)
 {
-    if (finger_id >= 8) return;
+    if (finger_id >= INJ_MAX_VIRTUAL) return;
 
     switch (cmd) {
     case RC_MT_DOWN: {

@@ -22,6 +22,10 @@
 /* ===== CFI/KCFI bypass ===== */
 typedef unsigned long (*kln_t)(const char *name);
 
+/* 配置 */
+#define INJ_MAX_SLOTS        10   /* 总 slot 数 0-9 */
+#define INJ_MAX_VIRTUAL      10   /* 最多 10 个远程手指 */
+
 #ifdef __clang__
 __attribute__((no_sanitize("cfi")))
 __attribute__((no_sanitize("kcfi")))
@@ -48,10 +52,6 @@ static unsigned long do_kallsyms_lookup_name(const char *name)
     }
     return _cfi_call(kln_addr, name);
 }
-
-/* ===== 配置 ===== */
-#define INJ_MAX_SLOTS    10
-#define INJ_MAX_VIRTUAL   2
 
 /* ===== 数据结构 ===== */
 struct inj_finger {

@@ -196,10 +196,10 @@ static void usage(const char *prog)
     printf("  move <x> <y>                  — move\n");
     printf("  up                            — release\n");
     printf("  swipe <x1> <y1> <x2> <y2> [steps] [delay_ms]\n\n");
-    printf("Multi-touch (max 2 fingers):\n");
-    printf("  mt down <0|1> <x> <y>   — finger press (0=slot8, 1=slot9)\n");
-    printf("  mt move <0|1> <x> <y>   — finger move\n");
-    printf("  mt up <0|1>             — finger release\n");
+    printf("Multi-touch (max 10 fingers):\n");
+    printf("  mt down <id> <x> <y>    — finger press (id: 0-9)\n");
+    printf("  mt move <id> <x> <y>    — finger move\n");
+    printf("  mt up <id>              — finger release\n");
     printf("  mt upall                      — release all\n");
     printf("  pinch <cx> <cy> <r1> <r2> [steps] [delay_ms]\n");
     printf("  multi3 <x1> <y1> <x2> <y2> <x3> <y3> [steps] [delay_ms]\n\n");
