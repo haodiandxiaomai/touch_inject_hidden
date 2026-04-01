@@ -1,10 +1,10 @@
 /*
- * inject.h — 触摸注入核心（handler grab 共存版）
+ * inject.h — 触摸注入核心（mt hijack + 永久扩展 num_slots 版）
  *
- * 方案：注册 input_handler，grab 触摸屏设备
- *   - grab 后，所有真实事件送到我们的 handler，Android 看不到
- *   - 我们在 handler 里读取真实触摸状态，合并虚拟触摸，统一输出
- *   - 不用 kprobe，不用猜函数签名，用内核标准 API
+ * 关键改动：
+ *   - num_slots 永久扩展到 INJ_MAX_SLOTS（不缩回）
+ *   - 真实驱动处理 slot 0..INJ_MAX_SLOTS-1，空 slot tracking_id=-1 不影响
+ *   - 虚拟触摸用高位 slot（8,9,...），永远不被真实驱动覆盖
  */
 #ifndef _INJECT_H
 #define _INJECT_H
@@ -14,6 +14,8 @@
 #include <linux/input.h>
 #include <linux/input/mt.h>
 #include <linux/device.h>
+#include <linux/interrupt.h>
+#include <linux/kprobes.h>
 
 #include "natural_touch.h"
 
@@ -48,12 +50,13 @@ static unsigned long do_kallsyms_lookup_name(const char *name)
 }
 
 /* ===== 配置 ===== */
-#define INJ_MAX_SLOTS    20
-#define INJ_MAX_VIRTUAL  10
+#define INJ_MAX_SLOTS    10
+#define INJ_MAX_VIRTUAL   2
 
-/* ===== 虚拟手指 ===== */
-struct inj_touch {
+/* ===== 数据结构 ===== */
+struct inj_finger {
     bool active;
+    s32  slot;
     s32  tracking_id;
     s32  x, y;
     s32  pressure;
@@ -62,150 +65,13 @@ struct inj_touch {
 
 static struct {
     struct input_dev *dev;
-    struct input_handle *handle;
     bool initialized;
+    struct inj_finger fingers[INJ_MAX_VIRTUAL];
     int native_slots;
-    s32 next_tid;
-
-    struct inj_touch virt[INJ_MAX_VIRTUAL];
+    s32 next_tracking_id;
+    s32 screen_max_x, screen_max_y;
     spinlock_t lock;
-} inj;
-
-/* ===== 合并输出 ===== */
-/*
- * 在 handler 的 event 回调里调用（dev->event_lock 已持有）
- * 读取 mt 真实状态 + 合并虚拟触摸 + 统一输出
- */
-static void inj_emit_merged(struct input_dev *dev)
-{
-    int i, slot = 0, total = 0;
-
-    if (!dev->mt) return;
-
-    /* 1. 真实触摸（从 mt 读取）*/
-    for (i = 0; i < dev->mt->num_slots; i++) {
-        s32 tid = input_mt_get_value(&dev->mt->slots[i], ABS_MT_TRACKING_ID);
-        if (tid != -1) {
-            input_event(dev, EV_ABS, ABS_MT_SLOT, slot);
-            input_event(dev, EV_ABS, ABS_MT_TRACKING_ID, tid);
-            input_event(dev, EV_ABS, ABS_MT_POSITION_X,
-                input_mt_get_value(&dev->mt->slots[i], ABS_MT_POSITION_X));
-            input_event(dev, EV_ABS, ABS_MT_POSITION_Y,
-                input_mt_get_value(&dev->mt->slots[i], ABS_MT_POSITION_Y));
-            if (test_bit(ABS_MT_PRESSURE, dev->absbit))
-                input_event(dev, EV_ABS, ABS_MT_PRESSURE,
-                    input_mt_get_value(&dev->mt->slots[i], ABS_MT_PRESSURE));
-            if (test_bit(ABS_MT_TOUCH_MAJOR, dev->absbit))
-                input_event(dev, EV_ABS, ABS_MT_TOUCH_MAJOR,
-                    input_mt_get_value(&dev->mt->slots[i], ABS_MT_TOUCH_MAJOR));
-            slot++;
-            total++;
-        }
-    }
-
-    /* 2. 虚拟触摸 */
-    for (i = 0; i < INJ_MAX_VIRTUAL; i++) {
-        if (inj.virt[i].active) {
-            input_event(dev, EV_ABS, ABS_MT_SLOT, slot);
-            input_event(dev, EV_ABS, ABS_MT_TRACKING_ID, inj.virt[i].tracking_id);
-            input_event(dev, EV_ABS, ABS_MT_POSITION_X, inj.virt[i].x);
-            input_event(dev, EV_ABS, ABS_MT_POSITION_Y, inj.virt[i].y);
-            if (test_bit(ABS_MT_PRESSURE, dev->absbit))
-                input_event(dev, EV_ABS, ABS_MT_PRESSURE, inj.virt[i].pressure);
-            if (test_bit(ABS_MT_TOUCH_MAJOR, dev->absbit))
-                input_event(dev, EV_ABS, ABS_MT_TOUCH_MAJOR, inj.virt[i].area);
-            slot++;
-            total++;
-        }
-    }
-
-    /* 3. 按键 + sync */
-    input_report_key(dev, BTN_TOUCH, total > 0);
-    input_report_key(dev, BTN_TOOL_FINGER, total == 1);
-    input_report_key(dev, BTN_TOOL_DOUBLETAP, total >= 2);
-    input_sync(dev);
-}
-
-/* ===== Handler event 回调 ===== */
-/*
- * grab 后，真实驱动的所有事件都送到这里
- * 我们吞掉原始事件，自己重新输出合并后的帧
- */
-static void inj_handler_event(struct input_handle *handle,
-                               unsigned int type, unsigned int code, int value)
-{
-    /* 只在 EV_SYN 时输出合并帧 */
-    if (type == EV_SYN)
-        inj_emit_merged(handle->dev);
-    /* 其他事件全部吞掉 */
-}
-
-/* ===== Handler 定义 ===== */
-static int inj_handler_connect(struct input_handler *handler, struct input_dev *dev,
-                                const struct input_device_id *id)
-{
-    struct input_handle *handle;
-    int err;
-
-    if (dev != inj.dev)
-        return -ENODEV;
-
-    handle = kzalloc(sizeof(*handle), GFP_KERNEL);
-    if (!handle)
-        return -ENOMEM;
-
-    handle->dev = dev;
-    handle->handler = handler;
-    handle->name = "inj_grab";
-
-    err = input_register_handle(handle);
-    if (err) {
-        kfree(handle);
-        return err;
-    }
-
-    err = input_open_device(handle);
-    if (err) {
-        input_unregister_handle(handle);
-        kfree(handle);
-        return err;
-    }
-
-    /* Grab！独占设备 */
-    /* 直接设置 dev->grab */
-    rcu_assign_pointer(dev->grab, handle);
-    inj.handle = handle;
-    pr_info("inject: grabbed '%s'\n", dev->name ?: "?");
-    return 0;
-}
-
-static void inj_handler_disconnect(struct input_handle *handle)
-{
-    RCU_INIT_POINTER(handle->dev->grab, NULL);
-    input_close_device(handle);
-    input_unregister_handle(handle);
-    kfree(handle);
-
-    if (inj.handle == handle)
-        inj.handle = NULL;
-}
-
-static const struct input_device_id inj_handler_ids[] = {
-    {
-        .flags = INPUT_DEVICE_ID_MATCH_EVBIT | INPUT_DEVICE_ID_MATCH_ABSBIT,
-        .evbit = { BIT_MASK(EV_ABS) },
-        .absbit = { BIT_MASK(ABS_MT_SLOT) },
-    },
-    { },
-};
-
-static struct input_handler inj_handler = {
-    .event      = inj_handler_event,
-    .connect    = inj_handler_connect,
-    .disconnect = inj_handler_disconnect,
-    .name       = "touch_inject",
-    .id_table   = inj_handler_ids,
-};
+} inj_ctx;
 
 /* ===== 查找触摸屏 ===== */
 static int inj_match_ts(struct device *dev, void *data)
@@ -223,17 +89,216 @@ static int inj_match_ts(struct device *dev, void *data)
     return 0;
 }
 
-/* ===== 初始化 ===== */
+/* ===== 动态 slot 分配 ===== */
+static inline bool inj_slot_occupied_by_physical(int slot)
+{
+    struct input_mt *mt = inj_ctx.dev->mt;
+    if (!mt || slot < 0 || slot >= INJ_MAX_SLOTS)
+        return true;
+    return input_mt_get_value(&mt->slots[slot], ABS_MT_TRACKING_ID) != -1;
+}
+
+static inline bool inj_slot_occupied_by_remote(int slot)
+{
+    int i;
+    for (i = 0; i < INJ_MAX_VIRTUAL; i++) {
+        if (inj_ctx.fingers[i].active && inj_ctx.fingers[i].slot == slot)
+            return true;
+    }
+    return false;
+}
+
+static inline int inj_alloc_slot(void)
+{
+    int i;
+    for (i = INJ_MAX_SLOTS - 1; i >= 0; i--) {
+        if (!inj_slot_occupied_by_physical(i) &&
+            !inj_slot_occupied_by_remote(i))
+            return i;
+    }
+    return -1;
+}
+
+static inline s32 inj_alloc_tracking_id(void)
+{
+    s32 id = inj_ctx.next_tracking_id++;
+    if (inj_ctx.next_tracking_id > 32767)
+        inj_ctx.next_tracking_id = 1;
+    return id;
+}
+
+/* ===== mt 初始化（劫持 + 永久扩展 num_slots） ===== */
+static inline int inj_init_mt(struct input_dev *dev)
+{
+    struct input_mt *mt = dev->mt;
+    struct input_mt *new_mt;
+    int native;
+    size_t size;
+
+    if (!mt) return -EINVAL;
+
+    native = mt->num_slots;
+    inj_ctx.native_slots = native;
+    inj_ctx.next_tracking_id = 1;
+
+    if (native >= INJ_MAX_SLOTS) {
+        pr_info("inject: native %d >= %d, no mod\n", native, INJ_MAX_SLOTS);
+        return 0;
+    }
+
+    /* 分配更大的 mt */
+    size = sizeof(struct input_mt) + INJ_MAX_SLOTS * sizeof(struct input_mt_slot);
+    new_mt = kzalloc(size, GFP_KERNEL);
+    if (!new_mt) return -ENOMEM;
+
+    new_mt->trkid = mt->trkid;
+    new_mt->num_slots = INJ_MAX_SLOTS;  /* 永久扩展！ */
+    new_mt->flags = (mt->flags & ~INPUT_MT_POINTER) | INPUT_MT_DIRECT;
+    new_mt->flags &= ~INPUT_MT_DROP_UNUSED;
+    new_mt->frame = mt->frame;
+    memcpy(new_mt->slots, mt->slots, native * sizeof(struct input_mt_slot));
+
+    if (mt->red) {
+        new_mt->red = kzalloc(INJ_MAX_SLOTS * INJ_MAX_SLOTS * sizeof(int), GFP_KERNEL);
+        if (!new_mt->red) { kfree(new_mt); return -ENOMEM; }
+    }
+
+    dev->mt = new_mt;
+
+    input_set_abs_params(dev, ABS_MT_SLOT, 0, INJ_MAX_SLOTS - 1,
+                        dev->absinfo[ABS_MT_SLOT].fuzz,
+                        dev->absinfo[ABS_MT_SLOT].resolution);
+
+    pr_info("inject: mt hijacked %d->%d slots (permanent)\n", native, INJ_MAX_SLOTS);
+    return 0;
+}
+
+/* ===== 按键管理 ===== */
+static inline int inj_count_active(void)
+{
+    struct input_mt *mt = inj_ctx.dev->mt;
+    int count = 0, i;
+
+    if (mt) {
+        for (i = 0; i < INJ_MAX_SLOTS; i++) {
+            if (inj_slot_occupied_by_remote(i))
+                continue;
+            if (input_mt_get_value(&mt->slots[i], ABS_MT_TRACKING_ID) != -1)
+                count++;
+        }
+    }
+
+    for (i = 0; i < INJ_MAX_VIRTUAL; i++) {
+        if (inj_ctx.fingers[i].active)
+            count++;
+    }
+    return count;
+}
+
+static inline void inj_update_keys(void)
+{
+    int count = inj_count_active();
+    struct input_dev *d = inj_ctx.dev;
+    input_report_key(d, BTN_TOUCH, count > 0);
+    input_report_key(d, BTN_TOOL_FINGER, count == 1);
+    input_report_key(d, BTN_TOOL_DOUBLETAP, count >= 2);
+}
+
+static inline void inj_lock_keys(struct input_dev *d)
+{
+    clear_bit(BTN_TOUCH, d->keybit);
+    clear_bit(BTN_TOOL_FINGER, d->keybit);
+    clear_bit(BTN_TOOL_DOUBLETAP, d->keybit);
+}
+
+static inline void inj_unlock_keys(struct input_dev *d)
+{
+    set_bit(BTN_TOUCH, d->keybit);
+    set_bit(BTN_TOOL_FINGER, d->keybit);
+    set_bit(BTN_TOOL_DOUBLETAP, d->keybit);
+}
+
+/* ===== 注入核心 ===== */
+static inline void inj_sync_frame(void)
+{
+    struct input_dev *dev = inj_ctx.dev;
+    unsigned long flags;
+    int i;
+    bool any_active = false;
+
+    if (!dev->absinfo) return;
+
+    local_irq_save(flags);
+
+    for (i = 0; i < INJ_MAX_VIRTUAL; i++) {
+        struct inj_finger *f = &inj_ctx.fingers[i];
+
+        if (!f->active || f->slot < 0)
+            continue;
+
+        any_active = true;
+
+        input_event(dev, EV_ABS, ABS_MT_SLOT, f->slot);
+        input_event(dev, EV_ABS, ABS_MT_TRACKING_ID, f->tracking_id);
+        input_event(dev, EV_ABS, ABS_MT_POSITION_X, f->x);
+        input_event(dev, EV_ABS, ABS_MT_POSITION_Y, f->y);
+
+        if (test_bit(ABS_MT_PRESSURE, dev->absbit))
+            input_event(dev, EV_ABS, ABS_MT_PRESSURE, f->pressure);
+        if (test_bit(ABS_MT_TOUCH_MAJOR, dev->absbit))
+            input_event(dev, EV_ABS, ABS_MT_TOUCH_MAJOR, f->area);
+        if (test_bit(ABS_MT_WIDTH_MAJOR, dev->absbit))
+            input_event(dev, EV_ABS, ABS_MT_WIDTH_MAJOR, f->area + 2);
+    }
+
+    if (any_active)
+        input_report_key(dev, BTN_TOUCH, 1);
+    input_sync(dev);
+
+    local_irq_restore(flags);
+}
+
+static inline void inj_release_finger(int finger_idx)
+{
+    struct input_dev *dev = inj_ctx.dev;
+    struct inj_finger *f = &inj_ctx.fingers[finger_idx];
+    unsigned long flags;
+
+    if (!f->active || f->slot < 0)
+        return;
+
+    local_irq_save(flags);
+
+    input_event(dev, EV_ABS, ABS_MT_SLOT, f->slot);
+    input_event(dev, EV_ABS, ABS_MT_TRACKING_ID, -1);
+
+    f->active = false;
+    f->slot = -1;
+    f->tracking_id = -1;
+
+    inj_update_keys();
+    input_sync(dev);
+
+    local_irq_restore(flags);
+}
+
+/* ===== 初始化/清理 ===== */
 static int inj_init(void)
 {
     struct input_dev *found = NULL;
     struct class *input_class;
     int ret, i;
 
-    if (inj.initialized) return 0;
+    if (inj_ctx.initialized) return 0;
 
-    memset(&inj, 0, sizeof(inj));
-    spin_lock_init(&inj.lock);
+    memset(&inj_ctx, 0, sizeof(inj_ctx));
+    spin_lock_init(&inj_ctx.lock);
+
+    for (i = 0; i < INJ_MAX_VIRTUAL; i++) {
+        inj_ctx.fingers[i].active = false;
+        inj_ctx.fingers[i].slot = -1;
+        inj_ctx.fingers[i].tracking_id = -1;
+    }
 
     input_class = (struct class *)do_kallsyms_lookup_name("input_class");
     if (!input_class) return -ENODEV;
@@ -241,112 +306,159 @@ static int inj_init(void)
     class_for_each_device(input_class, NULL, &found, inj_match_ts);
     if (!found) return -ENODEV;
 
-    inj.dev = found;
-    inj.native_slots = found->mt ? found->mt->num_slots : 0;
-    inj.next_tid = 10000;
+    inj_ctx.dev = found;
+    inj_ctx.screen_max_x = found->absinfo[ABS_MT_POSITION_X].maximum;
+    inj_ctx.screen_max_y = found->absinfo[ABS_MT_POSITION_Y].maximum;
 
-    for (i = 0; i < INJ_MAX_VIRTUAL; i++)
-        inj.virt[i].active = false;
+    ret = inj_init_mt(found);
+    if (ret) return ret;
 
-    /* 扩展 slot 范围 */
-    input_set_abs_params(found, ABS_MT_SLOT, 0, INJ_MAX_SLOTS - 1,
-                        found->absinfo[ABS_MT_SLOT].fuzz,
-                        found->absinfo[ABS_MT_SLOT].resolution);
-
-    /* 注册 handler（会自动 connect + grab） */
-    ret = input_register_handler(&inj_handler);
-    if (ret) {
-        pr_err("inject: input_register_handler failed: %d\n", ret);
-        return ret;
-    }
-
-    inj.initialized = true;
-    pr_info("inject: '%s' %dx%d native=%d, handler grab mode\n",
+    inj_ctx.initialized = true;
+    pr_info("inject: \'%s\' %dx%d native_slots=%d\n",
             found->name ?: "?",
-            found->absinfo[ABS_MT_POSITION_X].maximum,
-            found->absinfo[ABS_MT_POSITION_Y].maximum,
-            inj.native_slots);
+            inj_ctx.screen_max_x, inj_ctx.screen_max_y,
+            inj_ctx.native_slots);
     return 0;
 }
 
-/* ===== 清理 ===== */
 static void inj_cleanup(void)
 {
     int i;
-    if (!inj.initialized) return;
+    if (!inj_ctx.initialized) return;
 
-    input_unregister_handler(&inj_handler);
+    for (i = 0; i < INJ_MAX_VIRTUAL; i++) {
+        if (inj_ctx.fingers[i].active)
+            inj_release_finger(i);
+    }
 
-    for (i = 0; i < INJ_MAX_VIRTUAL; i++)
-        inj.virt[i].active = false;
-
-    inj.initialized = false;
+    inj_unlock_keys(inj_ctx.dev);
+    inj_ctx.initialized = false;
 }
 
-/* ===== 虚拟触摸接口 ===== */
+/* ===== 远程触控接口 ===== */
 static int inj_remote_down(s32 x, s32 y)
 {
-    int i;
+    struct nt_state *ns = nt_global;
+    struct inj_finger *f;
     unsigned long flags;
+    int slot, finger_idx = -1;
+    s32 pressure, area;
+    int i;
 
-    if (!inj.initialized || x < 0 || y < 0) return -ENODEV;
+    if (!inj_ctx.initialized || x < 0 || y < 0)
+        return -ENODEV;
 
-    spin_lock_irqsave(&inj.lock, flags);
+    spin_lock_irqsave(&inj_ctx.lock, flags);
+
     for (i = 0; i < INJ_MAX_VIRTUAL; i++) {
-        if (!inj.virt[i].active) {
-            inj.virt[i].active = true;
-            inj.virt[i].x = x;
-            inj.virt[i].y = y;
-            inj.virt[i].tracking_id = inj.next_tid++;
-            inj.virt[i].pressure = 60;
-            inj.virt[i].area = 10;
-            spin_unlock_irqrestore(&inj.lock, flags);
-            return i;
+        if (!inj_ctx.fingers[i].active) {
+            finger_idx = i;
+            break;
         }
     }
-    spin_unlock_irqrestore(&inj.lock, flags);
-    return -EBUSY;
+    if (finger_idx < 0) {
+        spin_unlock_irqrestore(&inj_ctx.lock, flags);
+        return -EBUSY;
+    }
+
+    slot = inj_alloc_slot();
+    if (slot < 0) {
+        spin_unlock_irqrestore(&inj_ctx.lock, flags);
+        pr_warn("inject: no free slot\n");
+        return -EBUSY;
+    }
+
+    f = &inj_ctx.fingers[finger_idx];
+    f->active = true;
+    f->slot = slot;
+    f->tracking_id = inj_alloc_tracking_id();
+    f->x = x;
+    f->y = y;
+
+    if (ns) {
+        nt_touch_begin(ns, x, y);
+        pressure = nt_calc_pressure(ns);
+        area = nt_calc_area(ns, pressure);
+    } else {
+        pressure = 60;
+        area = 10;
+    }
+    f->pressure = pressure;
+    f->area = area;
+
+    spin_unlock_irqrestore(&inj_ctx.lock, flags);
+
+    pr_debug("inject: remote_down finger=%d slot=%d tid=%d (%d,%d)\n",
+             finger_idx, slot, f->tracking_id, x, y);
+
+    inj_unlock_keys(inj_ctx.dev);
+    inj_sync_frame();
+    inj_lock_keys(inj_ctx.dev);
+
+    return finger_idx;
 }
 
 static int inj_remote_move(int finger_idx, s32 x, s32 y)
 {
+    struct nt_state *ns = nt_global;
+    struct inj_finger *f;
     unsigned long flags;
-    if (!inj.initialized || finger_idx < 0 || finger_idx >= INJ_MAX_VIRTUAL)
+    s32 pressure, area;
+    s64 delay;
+
+    if (!inj_ctx.initialized || finger_idx < 0 || finger_idx >= INJ_MAX_VIRTUAL)
         return -EINVAL;
 
-    spin_lock_irqsave(&inj.lock, flags);
-    if (!inj.virt[finger_idx].active) {
-        spin_unlock_irqrestore(&inj.lock, flags);
+    spin_lock_irqsave(&inj_ctx.lock, flags);
+    f = &inj_ctx.fingers[finger_idx];
+
+    if (!f->active) {
+        spin_unlock_irqrestore(&inj_ctx.lock, flags);
         return -ENODEV;
     }
-    inj.virt[finger_idx].x = x;
-    inj.virt[finger_idx].y = y;
-    spin_unlock_irqrestore(&inj.lock, flags);
+
+    f->x = x;
+    f->y = y;
+
+    if (ns) {
+        nt_touch_move(ns, x, y, &f->x, &f->y, &pressure, &area);
+        delay = nt_calc_delay(ns);
+    } else {
+        pressure = 60; area = 10; delay = 0;
+    }
+    f->pressure = pressure;
+    f->area = area;
+
+    spin_unlock_irqrestore(&inj_ctx.lock, flags);
+
+    if (delay > 0)
+        usleep_range((u32)(delay / 1000), (u32)(delay / 1000 + 200));
+
+    inj_sync_frame();
     return 0;
 }
 
 static int inj_remote_up(int finger_idx)
 {
-    unsigned long flags;
-    if (!inj.initialized || finger_idx < 0 || finger_idx >= INJ_MAX_VIRTUAL)
+    if (!inj_ctx.initialized || finger_idx < 0 || finger_idx >= INJ_MAX_VIRTUAL)
         return -EINVAL;
 
-    spin_lock_irqsave(&inj.lock, flags);
-    inj.virt[finger_idx].active = false;
-    spin_unlock_irqrestore(&inj.lock, flags);
+    if (!inj_ctx.fingers[finger_idx].active)
+        return -ENODEV;
+
+    inj_release_finger(finger_idx);
     return 0;
 }
 
 static int inj_remote_up_all(void)
 {
     int i;
-    unsigned long flags;
-    if (!inj.initialized) return -ENODEV;
+    if (!inj_ctx.initialized) return -ENODEV;
 
-    spin_lock_irqsave(&inj.lock, flags);
-    for (i = 0; i < INJ_MAX_VIRTUAL; i++)
-        inj.virt[i].active = false;
-    spin_unlock_irqrestore(&inj.lock, flags);
+    for (i = 0; i < INJ_MAX_VIRTUAL; i++) {
+        if (inj_ctx.fingers[i].active)
+            inj_release_finger(i);
+    }
     return 0;
 }
 
