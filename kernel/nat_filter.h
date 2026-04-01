@@ -152,11 +152,11 @@ static void nf_post_input_event(struct kprobe *p, struct pt_regs *regs,
         for (i = 0; i < INJ_MAX_VIRTUAL; i++) {
             struct inj_finger *f = &inj_ctx.fingers[i];
             if (f->active && f->slot == slot) {
-                mt->slots[slot].abs[ABS_MT_TRACKING_ID] = f->tracking_id;
-                mt->slots[slot].abs[ABS_MT_POSITION_X]  = f->x;
-                mt->slots[slot].abs[ABS_MT_POSITION_Y]  = f->y;
+                mt->slots[slot].abs[ABS_MT_TRACKING_ID - ABS_MT_FIRST] = f->tracking_id;
+                mt->slots[slot].abs[ABS_MT_POSITION_X - ABS_MT_FIRST]  = f->x;
+                mt->slots[slot].abs[ABS_MT_POSITION_Y - ABS_MT_FIRST]  = f->y;
                 if (test_bit(ABS_MT_PRESSURE, dev->absbit))
-                    mt->slots[slot].abs[ABS_MT_PRESSURE] = f->pressure;
+                    mt->slots[slot].abs[ABS_MT_PRESSURE - ABS_MT_FIRST] = f->pressure;
                 break;
             }
         }
