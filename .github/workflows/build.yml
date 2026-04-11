@@ -85,20 +85,33 @@ jobs:
           curl -L https://storage.googleapis.com/git-repo-downloads/repo -o git-repo/repo
           chmod +x git-repo/repo
           echo "$KERNEL_ROOT/git-repo" >> $GITHUB_PATH
+          REPO="$KERNEL_ROOT/git-repo/repo"
 
           FORMATTED_BRANCH="android14-6.1-2025-03"
-          git-repo/repo init --depth=1 \
-            -u https://android.googlesource.com/kernel/manifest \
-            -b common-${FORMATTED_BRANCH} \
-            --repo-rev=v2.16
+          $REPO init --depth=1             -u https://android.googlesource.com/kernel/manifest             -b common-${FORMATTED_BRANCH}             --repo-rev=v2.16
 
-          # 带重试的 repo sync（Google 源网络不稳定）
+          # 检测 deprecated 分支（GKI 项目的做法）
+          REMOTE_BRANCH=$(git ls-remote https://android.googlesource.com/kernel/common ${FORMATTED_BRANCH})
+          DEFAULT_MANIFEST=.repo/manifests/default.xml
+          if grep -q deprecated <<< $REMOTE_BRANCH; then
+            echo "检测到已弃用的分支: ${FORMATTED_BRANCH}"
+            sed -i "s/\"${FORMATTED_BRANCH}\"/\"deprecated\/${FORMATTED_BRANCH}\"/g" $DEFAULT_MANIFEST
+          fi
+
+          # 带重试的 repo sync
           for i in 1 2 3; do
             echo "repo sync 尝试 $i/3..."
-            git-repo/repo --trace sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc) && break
+            $REPO --trace sync -c -j$(nproc) --no-tags && break
             echo "第 $i 次同步失败，10 秒后重试..."
             sleep 10
           done
+
+          # 验证关键文件存在
+          ls -la common/build.config.gki* 2>/dev/null || echo "WARNING: build.config not found"
+          ls -la build/build.sh 2>/dev/null || echo "WARNING: build.sh not found"
+          ls -la common/Makefile 2>/dev/null || echo "WARNING: Makefile not found"
+          echo "=== 同步完成，目录内容 ==="
+          ls -la | head -20
 
       - name: 编译内核
         uses: nick-fields/retry@v3
