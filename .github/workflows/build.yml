@@ -78,12 +78,13 @@ jobs:
           git config --global user.email "build@ci.local"
 
       - name: 初始化 repo 同步内核源码 (android14-6.1-2025-03)
-        working-directory: ${{ env.KERNEL_ROOT }}
         run: |
+          mkdir -p $KERNEL_ROOT
+          cd $KERNEL_ROOT
           mkdir -p git-repo
           curl -L https://storage.googleapis.com/git-repo-downloads/repo -o git-repo/repo
           chmod +x git-repo/repo
-          echo "$GITHUB_WORKSPACE/git-repo" >> $GITHUB_PATH
+          echo "$KERNEL_ROOT/git-repo" >> $GITHUB_PATH
 
           FORMATTED_BRANCH="android14-6.1-2025-03"
           git-repo/repo init --depth=1 \
