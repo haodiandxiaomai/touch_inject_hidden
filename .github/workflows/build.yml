@@ -5,20 +5,22 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
 
     env:
-      KERNEL_ROOT: ${{ github.workspace }}/aosp-kernel
-      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
-      CCACHE_NOHASHDIR: "true"
-      CCACHE_HARDLINK: "true"
+      FORMATTED_BRANCH: "android14-6.1-2025-03"
 
     steps:
-      - name: Checkout
+      - name: Checkout 项目
         uses: actions/checkout@v4
+        with:
+          path: touch_inject_hidden
 
       - name: 清理磁盘空间
         uses: endersonmenezes/free-disk-space@v3
@@ -35,117 +37,143 @@ jobs:
           rmz_version: "3.1.1"
           testing: false
 
-      - name: 安装依赖
+      - name: 安装系统依赖
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
-          packages: ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves
+          packages: ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves bc clang lld binutils-aarch64-linux-gnu
           execute_install_scripts: true
+
+      - name: 下载 repo 工具
+        run: |
+          mkdir -p ~/bin
+          curl -L https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
+          chmod +x ~/bin/repo
+          echo "~/bin" >> $GITHUB_PATH
+
+      - name: 下载内核构建工具
+        run: |
+          git clone https://android.googlesource.com/kernel/prebuilts/build-tools -b main-kernel-build-2024 --depth 1 kernel-build-tools
+          git clone https://android.googlesource.com/platform/system/tools/mkbootimg -b main-kernel-build-2024 --depth 1 mkbootimg
 
       - name: 配置 ccache
         run: |
+          mkdir -p ~/.cache/bazel
           ccache --max-size=2G
           ccache --set-config=compression=true
-          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
 
-      - name: 恢复 ccache 缓存
+      - name: ccache 缓存
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: android14-6.1-128-ccache-${{ github.sha }}
+          key: a14-6.1-128-ccache-v2-${{ github.sha }}
           restore-keys: |
-            android14-6.1-128-ccache-
+            a14-6.1-128-ccache-v2-
 
-      - name: 缓存工具链
-        id: cache-toolchain
-        uses: actions/cache@v4
-        with:
-          path: |
-            kernel-build-tools
-            mkbootimg
-          key: toolchain-${{ runner.os }}-v1
-
-      - name: 下载工具链
-        if: steps.cache-toolchain.outputs.cache-hit != 'true'
-        run: |
-          AOSP=https://android.googlesource.com
-          BRANCH=main-kernel-build-2024
-          git clone $AOSP/kernel/prebuilts/build-tools -b $BRANCH --depth 1 kernel-build-tools
-          git clone $AOSP/platform/system/tools/mkbootimg -b $BRANCH --depth 1 mkbootimg
-
-      - name: 配置 Git
+      - name: Git 配置
         run: |
           git config --global user.name "BuildBot"
           git config --global user.email "build@ci.local"
 
-      - name: 初始化 repo 同步内核源码 (android14-6.1-2025-03)
+      - name: 同步内核源码
         run: |
-          mkdir -p $KERNEL_ROOT
-          cd $KERNEL_ROOT
-          mkdir -p git-repo
-          curl -L https://storage.googleapis.com/git-repo-downloads/repo -o git-repo/repo
-          chmod +x git-repo/repo
-          echo "$KERNEL_ROOT/git-repo" >> $GITHUB_PATH
-          REPO="$KERNEL_ROOT/git-repo/repo"
+          FB="${{ env.FORMATTED_BRANCH }}"
+          KR="$GITHUB_WORKSPACE/$FB"
+          mkdir -p "$KR"
+          cd "$KR"
 
-          FORMATTED_BRANCH="android14-6.1-2025-03"
-          $REPO init --depth=1             -u https://android.googlesource.com/kernel/manifest             -b common-${FORMATTED_BRANCH}             --repo-rev=v2.16
+          echo "repo init: common-$FB"
+          repo init --depth=1 \
+            -u https://android.googlesource.com/kernel/manifest \
+            -b common-$FB \
+            --repo-rev=v2.16
 
-          # 检测 deprecated 分支（GKI 项目的做法）
-          REMOTE_BRANCH=$(git ls-remote https://android.googlesource.com/kernel/common ${FORMATTED_BRANCH})
-          DEFAULT_MANIFEST=.repo/manifests/default.xml
-          if grep -q deprecated <<< $REMOTE_BRANCH; then
-            echo "检测到已弃用的分支: ${FORMATTED_BRANCH}"
-            sed -i "s/\"${FORMATTED_BRANCH}\"/\"deprecated\/${FORMATTED_BRANCH}\"/g" $DEFAULT_MANIFEST
+          # 检查分支是否已弃用
+          RB=$(git ls-remote https://android.googlesource.com/kernel/common $FB 2>/dev/null || true)
+          if echo "$RB" | grep -q deprecated 2>/dev/null; then
+            echo "分支已弃用，切换到 deprecated 路径"
+            sed -i "s/\"$FB\"/\"deprecated\/$FB\"/g" .repo/manifests/default.xml
           fi
 
-          # 带重试的 repo sync
-          for i in 1 2 3; do
-            echo "repo sync 尝试 $i/3..."
-            $REPO --trace sync -c -j$(nproc) --no-tags && break
-            echo "第 $i 次同步失败，10 秒后重试..."
-            sleep 10
-          done
+          echo "repo sync 开始..."
+          repo --trace sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc)
 
-          # 验证关键文件存在
-          ls -la common/build.config.gki* 2>/dev/null || echo "WARNING: build.config not found"
-          ls -la build/build.sh 2>/dev/null || echo "WARNING: build.sh not found"
-          ls -la common/Makefile 2>/dev/null || echo "WARNING: Makefile not found"
-          echo "=== 同步完成，目录内容 ==="
-          ls -la | head -20
+          echo "KERNEL_ROOT=$KR" >> $GITHUB_ENV
+          echo "同步完成"
 
-      - name: 编译内核 (Bazel)
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 30
-          max_attempts: 3
-          retry_on: timeout
-          command: |
-            cd $KERNEL_ROOT
-            sed -i 's/check_defconfig//' ./common/build.config.gki
-            tools/bazel build --disk_cache=$HOME/.cache/bazel               --config=fast --lto=thin               //common:kernel_aarch64 //common:kernel_aarch64_modules_prepare
+      - name: 编译内核 (bazel)
+        run: |
+          cd $KERNEL_ROOT
+          sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' common/build.config.gki.aarch64 2>/dev/null || true
+          sed -i '/MODULES_ORDER=android\/gki_aarch64_modules/d' common/build.config.gki.aarch64 2>/dev/null || true
+          sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' common/build.config.gki.aarch64 2>/dev/null || true
+          sed -i 's/check_defconfig//' common/build.config.gki 2>/dev/null || true
+          sed -i '/protected_exports_list.*android\/abi_gki_protected_exports_aarch64/d' common/BUILD.bazel 2>/dev/null || true
+          sed -i '/kmi_symbol_list_strict_mode/d' common/BUILD.bazel 2>/dev/null || true
+
+          tools/bazel build --disk_cache=$HOME/.cache/bazel --config=fast \
+            //common:kernel_aarch64 //common:kernel_aarch64_modules_prepare || exit 1
+
+          BAZEL_OUT=$(readlink -f bazel-bin/common/kernel_aarch64)
+          echo "BAZEL_OUT=$BAZEL_OUT" >> $GITHUB_ENV
+          echo "=== 内核版本 ==="
+          strings "$BAZEL_OUT/Image" | grep 'Linux version' | head -1
+
+      - name: 解压 modules_prepare
+        run: |
+          cd "$BAZEL_OUT"
+          MP_TGZ="../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz"
+          if [ ! -f "$MP_TGZ" ]; then
+            echo "ERROR: $MP_TGZ 不存在"
+            ls -la ../kernel_aarch64_modules_prepare/ || true
+            exit 1
+          fi
+          tar -xzf "$MP_TGZ"
+          echo "modules_prepare 解压完成"
 
       - name: 编译 touch_inject_hidden.ko
         run: |
-          cd $KERNEL_ROOT
-          BAZEL_OUT=$(readlink -f bazel-bin/common/kernel_aarch64)
+          DRIVER_SRC="$GITHUB_WORKSPACE/touch_inject_hidden/kernel"
+          KDIR="$KERNEL_ROOT/common"
 
-          # 解压 modules_prepare
-          if [ -f "$BAZEL_OUT/../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz" ]; then
-            cd "$BAZEL_OUT"
-            tar -xzf ../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz
-            cd $KERNEL_ROOT
+          # 查找 clang（repo sync 同步的 prebuilts）
+          CLANG_DIR=$(find "$KERNEL_ROOT/prebuilts/clang/host/linux-x86" -maxdepth 1 -name "clang-*" -type d | sort -V | tail -1)
+          if [ -n "$CLANG_DIR" ] && [ -x "$CLANG_DIR/bin/clang" ]; then
+            echo "使用 prebuilts clang: $CLANG_DIR"
+          else
+            CLANG_DIR="/usr"
+            echo "使用系统 clang"
           fi
 
-          # 安装 clang（bazel 的 clang 在 hermetic 缓存里不好找）
-          sudo apt-get install -y clang lld
-          clang --version
+          CROSS="$KERNEL_ROOT/prebuilts/ndk-r23/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-"
+          if [ ! -x "${CROSS}gcc" ]; then
+            CROSS="aarch64-linux-gnu-"
+            echo "CROSS_COMPILE fallback 到系统工具链"
+          fi
 
-          make -C common O="$BAZEL_OUT" M="${{ github.workspace }}/kernel" ARCH=arm64 \
-            CC="clang" CROSS_COMPILE="aarch64-linux-gnu-" \
-            modules -j$(nproc)
+          echo "=== 编译参数 ==="
+          echo "KDIR=$KDIR"
+          echo "O=$BAZEL_OUT"
+          echo "M=$DRIVER_SRC"
+          $CLANG_DIR/bin/clang --version 2>/dev/null || clang --version
+          echo "CROSS_COMPILE=$CROSS"
 
-      - name: 上传 .ko
+          env PATH="$CLANG_DIR/bin:$PATH" \
+            make -C "$KDIR" \
+              O="$BAZEL_OUT" \
+              M="$DRIVER_SRC" \
+              ARCH=arm64 \
+              LLVM=1 \
+              LLVM_IAS=1 \
+              CROSS_COMPILE="$CROSS" \
+              CLANG_TRIPLE=aarch64-linux-gnu- \
+              modules -j$(nproc)
+
+          echo "=== 编译结果 ==="
+          ls -la "$DRIVER_SRC/touch_inject_hidden.ko"
+          file "$DRIVER_SRC/touch_inject_hidden.ko"
+
+      - name: 上传 touch_inject_hidden.ko
         uses: actions/upload-artifact@v4
         with:
-          name: touch_inject_hidden.ko
+          name: touch_inject_hidden-6.1.128-ko
           path: touch_inject_hidden/kernel/touch_inject_hidden.ko
