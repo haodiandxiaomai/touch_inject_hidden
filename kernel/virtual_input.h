@@ -1,9 +1,11 @@
 /*
- * virtual_input.h — 虚拟触摸注入（简化版）
+ * virtual_input.h — 虚拟触摸注入 v3
  *
- * 不劫持 MT 结构体，直接利用设备已有的 slot 系统
- * 如果设备支持 slot 9 (max >= 9)，直接注入
- * 否则动态调整 num_slots 临时开启 slot 9
+ * 完全复刻 lsdriver 的 send_report：
+ * 1. 临时扩大 mt->num_slots 到 10
+ * 2. 注入 slot 9 事件
+ * 3. 恢复 mt->num_slots 到原始值
+ * 4. 不替换 mt 指针，只改 num_slots 整数值
  */
 
 #ifndef VIRTUAL_INPUT_H
@@ -19,16 +21,14 @@
 
 #include "io_struct.h"
 
-/* 虚拟触摸使用的 slot 编号 */
 #define TARGET_SLOT_IDX 9
+#define TOTAL_SLOTS     10
 
 /* 虚拟触摸上下文 */
 static struct
 {
     struct input_dev *dev;
     int tracking_id;
-    int original_num_slots; /* 记住原始 slot 数 */
-    int max_slots;          /* ABS_MT_SLOT 的 max 值 */
     bool has_touch_major;
     bool has_width_major;
     bool has_pressure;
@@ -40,7 +40,6 @@ static struct
 
 /*
  * 匹配触摸屏设备
- * 条件：支持 EV_ABS + ABS_MT_SLOT + BTN_TOUCH + 有 input_mt
  */
 static int match_touchscreen(struct device *dev, void *data)
 {
@@ -53,45 +52,51 @@ static int match_touchscreen(struct device *dev, void *data)
         input->mt)
     {
         *result = input;
-        return 1; /* 停止遍历 */
+        return 1;
     }
     return 0;
 }
 
 /*
- * 发送触摸报告
+ * 发送触摸报告 — 完全复刻 lsdriver 的 send_report
  *
- * 策略：
- * 1. 如果设备 num_slots > TARGET_SLOT_IDX，直接注入
- * 2. 否则临时扩大 num_slots 到 TARGET_SLOT_IDX+1，注入后恢复
- * 3. 绝不替换 dev->mt 指针，只临时改 num_slots 值
+ * 关键步骤：
+ * 1. local_irq_save — 防止中断
+ * 2. 保存当前 slot
+ * 3. 临时改 num_slots = 10 — 让驱动认为有 10 个 slot
+ * 4. 发送 ABS_MT_SLOT=9 — 切到 slot 9
+ * 5. input_mt_report_slot_state — 设置手指状态
+ * 6. 发送坐标 + 面积 + 压力
+ * 7. 恢复 num_slots = 原值 — 驱动认为只有 9 个 slot
+ * 8. 恢复 ABS_MT_SLOT = 原 slot
+ * 9. 更新全局按键 (BTN_TOUCH 等)
+ * 10. input_sync — 提交事件
+ * 11. local_irq_restore
+ *
+ * 绝不调用 input_mt_sync_frame()
  */
 static void send_report(int x, int y, bool touching)
 {
     struct input_dev *dev = vt.dev;
-    struct input_mt *mt = dev->mt;
+    struct input_mt *mt;
+    unsigned long flags;
     int old_slot;
     int old_num_slots;
-    unsigned long flags;
-    bool need_expand;
+    int count;
+    int i;
 
-    if (!dev || !mt)
+    if (!dev || !dev->mt)
         return;
+
+    mt = dev->mt;
 
     local_irq_save(flags);
 
-    /* 保存当前 slot */
     old_slot = dev->absinfo[ABS_MT_SLOT].value;
-
-    /* 检查是否需要临时扩大 slot 数 */
-    need_expand = (mt->num_slots <= TARGET_SLOT_IDX);
     old_num_slots = mt->num_slots;
 
-    if (need_expand)
-    {
-        /* 临时扩大：让驱动认为 slot 9 存在 */
-        mt->num_slots = TARGET_SLOT_IDX + 1;
-    }
+    /* 临时扩大 slot 数 */
+    mt->num_slots = TOTAL_SLOTS;
 
     /* 选中 slot 9 */
     input_event(dev, EV_ABS, ABS_MT_SLOT, TARGET_SLOT_IDX);
@@ -113,32 +118,28 @@ static void send_report(int x, int y, bool touching)
     }
 
     /* 恢复 num_slots */
-    if (need_expand)
-    {
-        mt->num_slots = old_num_slots;
-    }
+    mt->num_slots = old_num_slots;
 
     /* 恢复 slot */
     input_event(dev, EV_ABS, ABS_MT_SLOT, old_slot);
 
-    /* 更新全局按键状态 */
+    /* 统计活跃手指数 */
+    count = 0;
+    for (i = 0; i < old_num_slots && i < 32; i++)
     {
-        int phys_count = 0;
-        int i;
-        for (i = 0; i < min(old_num_slots, 32); i++)
-        {
-            if (input_mt_get_value(&mt->slots[i], ABS_MT_TRACKING_ID) != -1)
-                phys_count++;
-        }
-        if (touching)
-            phys_count++;
-
-        input_report_key(dev, BTN_TOUCH, phys_count > 0);
-        input_report_key(dev, BTN_TOOL_FINGER, phys_count == 1);
-        input_report_key(dev, BTN_TOOL_DOUBLETAP, phys_count >= 2);
+        if (input_mt_get_value(&mt->slots[i], ABS_MT_TRACKING_ID) != -1)
+            count++;
     }
+    if (touching)
+        count++;
+
+    /* 更新全局按键 */
+    input_report_key(dev, BTN_TOUCH, count > 0);
+    input_report_key(dev, BTN_TOOL_FINGER, count == 1);
+    input_report_key(dev, BTN_TOOL_DOUBLETAP, count >= 2);
 
     input_sync(dev);
+
     local_irq_restore(flags);
 }
 
@@ -175,20 +176,15 @@ static void v_touch_event(enum sm_req_op op, int x, int y)
 
 /*
  * 初始化虚拟触摸
- *
- * 通过 input_class 遍历输入设备，找到触摸屏
- * 不劫持任何结构体，只记录设备指针和能力
  */
 static int v_touch_init(int *max_x, int *max_y)
 {
     struct input_dev *found = NULL;
     struct class *input_class;
-    struct input_mt *mt;
 
     if (!max_x || !max_y)
         return -EINVAL;
 
-    /* 已初始化则直接返回 */
     if (vt.initialized)
     {
         *max_x = vt.dev->absinfo[ABS_MT_POSITION_X].maximum;
@@ -196,34 +192,24 @@ static int v_touch_init(int *max_x, int *max_y)
         return 0;
     }
 
-    /* 获取 input_class */
     input_class = (struct class *)generic_kallsyms_lookup_name("input_class");
     if (!input_class)
         return -EFAULT;
 
-    /* 遍历找到触摸屏 */
     class_for_each_device(input_class, NULL, &found, match_touchscreen);
     if (!found)
         return -ENODEV;
 
-    mt = found->mt;
-    if (!mt)
-        return -ENODEV;
-
-    /* 记录设备信息 */
     get_device(&found->dev);
     vt.dev = found;
-    vt.tracking_id = -1;
-    vt.original_num_slots = mt->num_slots;
-    vt.max_slots = found->absinfo ? found->absinfo[ABS_MT_SLOT].maximum : 0;
     vt.has_touch_major = test_bit(ABS_MT_TOUCH_MAJOR, found->absbit);
     vt.has_width_major = test_bit(ABS_MT_WIDTH_MAJOR, found->absbit);
     vt.has_pressure = test_bit(ABS_MT_PRESSURE, found->absbit);
+    vt.tracking_id = -1;
+    vt.initialized = true;
 
-    /* 返回屏幕尺寸 */
     *max_x = found->absinfo[ABS_MT_POSITION_X].maximum;
     *max_y = found->absinfo[ABS_MT_POSITION_Y].maximum;
-    vt.initialized = true;
 
     return 0;
 }
@@ -249,7 +235,6 @@ static void v_touch_destroy(void)
     }
 
     vt.initialized = false;
-    vt.tracking_id = -1;
 }
 
 #endif /* VIRTUAL_INPUT_H */
