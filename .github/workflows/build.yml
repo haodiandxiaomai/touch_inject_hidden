@@ -16,7 +16,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup environment (free disk space)
+      - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /etc/mysql /etc/sphinx /etc/php /usr/lib/jvm
           sudo apt-get clean
@@ -29,38 +29,61 @@ jobs:
             zip curl zlib1g-dev gcc-multilib g++-multilib libc6-dev-i386 \
             libncurses5 lib32ncurses5-dev x11proto-core-dev libx11-dev \
             lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip \
-            python3 python-is-python3 repo
+            python3 python-is-python3
 
-      - name: Initialize repo and sync kernel source (android14-6.1)
+      - name: Install repo tool
+        run: |
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: android14-6.1
+
+      - name: Sync kernel source (android14-6.1)
         run: |
           mkdir -p aosp-kernel && cd aosp-kernel
           git config --global user.name "CI Builder"
           git config --global user.email "ci@example.com"
-          repo init -u https://android.googlesource.com/kernel/manifest -b common-android14-6.1 --depth=1
-          repo sync -c -j$(nproc) --no-tags --no-clone-bundle
+          repo init -u https://android.googlesource.com/kernel/manifest \
+            -b common-android14-6.1 --depth=1
+          repo sync -c --no-tags --no-clone-bundle -j$(nproc) --force-sync
 
-      - name: Build kernel + modules_prepare
+      - name: Build kernel + modules_prepare (Bazel)
         run: |
           cd aosp-kernel
-          build/build.sh -j$(nproc) modules_prepare
+          tools/bazel build //common:kernel_aarch64 //common:kernel_aarch64_modules_prepare
 
-      - name: Extract modules_prepare artifacts
+      - name: Extract modules_prepare
         run: |
           cd aosp-kernel
-          # modules_prepare 输出通常在 out/ 目录
-          ls out/
+          BAZEL_OUT=$(readlink -f bazel-bin/common/kernel_aarch64)
+          cd "$BAZEL_OUT"
+          tar -xzf ../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz
 
-      - name: Copy touch_inject_hidden source
-        run: |
-          cp -r touch_inject_hidden/kernel aosp-kernel/touch_inject_hidden_kernel
-
-      - name: Build kernel module
+      - name: Build touch_inject_hidden.ko
         run: |
           cd aosp-kernel
-          make M=touch_inject_hidden_kernel modules
+          BAZEL_OUT=$(readlink -f bazel-bin/common/kernel_aarch64)
+          TOOLCHAIN=$(find prebuilts/clang/host/linux-x86 -maxdepth 1 -name "clang-*" | head -1)
+          CROSS_PREFIX=$(find prebuilts -path "*/linux-x86_64/bin/aarch64-linux-android-*" -name "aarch64-linux-android-*" | head -1 | sed 's/-gcc$//' | sed 's/-ld$//')
+
+          make -C common \
+            O="$BAZEL_OUT" \
+            M="$GITHUB_WORKSPACE/touch_inject_hidden/kernel" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            LLVM_TOOLCHAIN_PATH="$TOOLCHAIN" \
+            modules -j$(nproc)
 
       - name: Upload .ko artifact
         uses: actions/upload-artifact@v4
         with:
           name: touch_inject_hidden.ko
-          path: aosp-kernel/touch_inject_hidden_kernel/touch_inject_hidden.ko
+          path: kernel/touch_inject_hidden.ko
