@@ -92,7 +92,13 @@ jobs:
             -b common-${FORMATTED_BRANCH} \
             --repo-rev=v2.16
 
-          git-repo/repo --trace sync -c -j$(nproc) --no-tags --fail-fast
+          # 带重试的 repo sync（Google 源网络不稳定）
+          for i in 1 2 3; do
+            echo "repo sync 尝试 $i/3..."
+            git-repo/repo --trace sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc) && break
+            echo "第 $i 次同步失败，10 秒后重试..."
+            sleep 10
+          done
 
       - name: 编译内核
         uses: nick-fields/retry@v3
