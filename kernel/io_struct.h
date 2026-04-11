@@ -25,19 +25,21 @@ enum sm_req_op
     op_up,          // 触摸抬起
     op_init_touch,  // 初始化触摸驱动
     op_kexit        // 内核线程退出
-} __attribute__((packed));
+} ;
 
 /*
  * 共享内存请求结构体
  * 简化版：只保留触摸注入所需字段
  * 删除了 pid, target_addr, size, user_buffer, mem_info, bt, bs, len_bytes, bp_info
+ *
+ * 注意：不能用 packed，否则 enum/op 变成 1 字节导致偏移与用户态不一致
  */
 struct req_obj
 {
     atomic_t kernel; // 由用户模式设置: 1 = 内核有待处理的请求, 0 = 请求已完成
     atomic_t user;   // 由内核模式设置: 1 = 用户模式有待处理的请求, 0 = 请求已完成
 
-    enum sm_req_op op; // 共享内存请求操作类型
+    enum sm_req_op op; // 共享内存请求操作类型（4 字节，不用 packed）
     int status;        // 操作状态（成功返回0，失败返回负值）
 
     // 初始化触摸驱动时返回屏幕维度
@@ -47,6 +49,6 @@ struct req_obj
     // 触摸坐标
     int x;
     int y;
-} __attribute__((packed));
+};
 
 #endif // IO_STRUCT_H
