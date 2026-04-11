@@ -136,7 +136,15 @@ jobs:
             cd $KERNEL_ROOT
           fi
 
-          make -C common             O="$BAZEL_OUT"             M="${{ github.workspace }}/touch_inject_hidden/kernel"             ARCH=arm64             LLVM=1             LLVM_IAS=1             modules -j$(nproc)
+          TOOLCHAIN=$(find prebuilts/clang/host/linux-x86 -maxdepth 1 -name "clang-*" -type d 2>/dev/null | sort -V | tail -1)
+          if [ -z "$TOOLCHAIN" ]; then
+            TOOLCHAIN=$(find $BAZEL_OUT -maxdepth 5 -name "clang" -type f -path "*/bin/*" 2>/dev/null | head -1 | xargs dirname | xargs dirname)
+          fi
+          echo "TOOLCHAIN: $TOOLCHAIN"
+          clang --version 2>/dev/null || echo "No system clang"
+          $TOOLCHAIN/bin/clang --version 2>/dev/null || echo "No toolchain clang"
+
+          make -C common O="$BAZEL_OUT" M="${{ github.workspace }}/kernel" ARCH=arm64 LLVM=1 LLVM_IAS=1 CC="${TOOLCHAIN}/bin/clang" CROSS_COMPILE="${TOOLCHAIN}/bin/llvm-" modules -j$(nproc)
 
       - name: 上传 .ko
         uses: actions/upload-artifact@v4
