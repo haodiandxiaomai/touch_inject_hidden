@@ -135,9 +135,10 @@ jobs:
           DRIVER_SRC="$GITHUB_WORKSPACE/touch_inject_hidden/kernel"
           KDIR="$KERNEL_ROOT/common"
 
-          # 查找 clang（repo sync 同步的 prebuilts）
-          CLANG_DIR=$(find "$KERNEL_ROOT/prebuilts/clang/host/linux-x86" -maxdepth 1 -name "clang-*" -type d | sort -V | tail -1)
-          if [ -n "$CLANG_DIR" ] && [ -x "$CLANG_DIR/bin/clang" ]; then
+          # 查找 clang（repo sync 同步的 prebuilts，深度搜索）
+          CLANG_BIN=$(find "$KERNEL_ROOT/prebuilts/clang/host/linux-x86" -name "clang" -type f 2>/dev/null | head -1)
+          if [ -n "$CLANG_BIN" ] && [ -x "$CLANG_BIN" ]; then
+            CLANG_DIR=$(dirname $(dirname "$CLANG_BIN"))
             echo "使用 prebuilts clang: $CLANG_DIR"
           else
             CLANG_DIR="/usr"
