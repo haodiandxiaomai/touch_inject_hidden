@@ -1,89 +1,138 @@
-name: Build touch_inject_hidden Kernel Module
+name: Build touch_inject_hidden
 
 on:
   push:
-    branches: [main]
-  pull_request:
     branches: [main]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 60
+
+    env:
+      KERNEL_ROOT: ${{ github.workspace }}/aosp-kernel
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/sphinx /etc/php /usr/lib/jvm
-          sudo apt-get clean
-          df -h
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git-core gnupg flex bison build-essential \
-            zip curl zlib1g-dev gcc-multilib g++-multilib libc6-dev-i386 \
-            libncurses-dev lib32ncurses-dev x11proto-core-dev libx11-dev \
-            lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip \
-            python3 python-is-python3
-
-      - name: Install repo tool
-        run: |
-          mkdir -p ~/bin
-          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-          chmod a+x ~/bin/repo
-          echo "$HOME/bin" >> $GITHUB_PATH
-
-      - name: Setup ccache
-        uses: hendrikmuhs/ccache-action@v1.2
+      - name: 清理磁盘空间
+        uses: endersonmenezes/free-disk-space@v3
         with:
-          key: android14-6.1
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+          remove_swap: true
+          remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
+          remove_packages_one_command: true
+          remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+          rm_cmd: "rmz"
+          rmz_version: "3.1.1"
+          testing: false
 
-      - name: Sync kernel source (android14-6.1)
+      - name: 安装依赖
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves
+          execute_install_scripts: true
+
+      - name: 配置 ccache
         run: |
-          mkdir -p aosp-kernel && cd aosp-kernel
-          git config --global user.name "CI Builder"
-          git config --global user.email "ci@example.com"
-          repo init -u https://android.googlesource.com/kernel/manifest \
-            -b common-android14-6.1 --depth=1
-          repo sync -c --no-tags --no-clone-bundle -j$(nproc) --force-sync
+          ccache --max-size=2G
+          ccache --set-config=compression=true
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
 
-      - name: Build kernel + modules_prepare (Bazel)
+      - name: 恢复 ccache 缓存
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: android14-6.1-128-ccache-${{ github.sha }}
+          restore-keys: |
+            android14-6.1-128-ccache-
+
+      - name: 缓存工具链
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            kernel-build-tools
+            mkbootimg
+          key: toolchain-${{ runner.os }}-v1
+
+      - name: 下载工具链
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
-          cd aosp-kernel
-          tools/bazel build //common:kernel_aarch64 //common:kernel_aarch64_modules_prepare
+          AOSP=https://android.googlesource.com
+          BRANCH=main-kernel-build-2024
+          git clone $AOSP/kernel/prebuilts/build-tools -b $BRANCH --depth 1 kernel-build-tools
+          git clone $AOSP/platform/system/tools/mkbootimg -b $BRANCH --depth 1 mkbootimg
 
-      - name: Extract modules_prepare
+      - name: 配置 Git
         run: |
-          cd aosp-kernel
-          BAZEL_OUT=$(readlink -f bazel-bin/common/kernel_aarch64)
-          cd "$BAZEL_OUT"
-          tar -xzf ../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz
+          git config --global user.name "BuildBot"
+          git config --global user.email "build@ci.local"
 
-      - name: Build touch_inject_hidden.ko
+      - name: 初始化 repo 同步内核源码 (android14-6.1-2025-03)
+        working-directory: ${{ env.KERNEL_ROOT }}
         run: |
-          cd aosp-kernel
-          BAZEL_OUT=$(readlink -f bazel-bin/common/kernel_aarch64)
-          TOOLCHAIN=$(find prebuilts/clang/host/linux-x86 -maxdepth 1 -name "clang-*" | head -1)
-          CROSS_PREFIX=$(find prebuilts -path "*/linux-x86_64/bin/aarch64-linux-android-*" -name "aarch64-linux-android-*" | head -1 | sed 's/-gcc$//' | sed 's/-ld$//')
+          mkdir -p git-repo
+          curl -L https://storage.googleapis.com/git-repo-downloads/repo -o git-repo/repo
+          chmod +x git-repo/repo
+          echo "$GITHUB_WORKSPACE/git-repo" >> $GITHUB_PATH
 
+          FORMATTED_BRANCH="android14-6.1-2025-03"
+          git-repo/repo init --depth=1 \
+            -u https://android.googlesource.com/kernel/manifest \
+            -b common-${FORMATTED_BRANCH} \
+            --repo-rev=v2.16
+
+          git-repo/repo --trace sync -c -j$(nproc) --no-tags --fail-fast
+
+      - name: 编译内核
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 30
+          max_attempts: 3
+          retry_on: timeout
+          command: |
+            cd $KERNEL_ROOT
+            # 禁用 system DLKM 和 KMI 严格模式
+            sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' ./common/build.config.gki.aarch64
+            sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' ./common/build.config.gki.aarch64
+            sed -i 's/check_defconfig//' ./common/build.config.gki
+
+            LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 \
+              build/build.sh CC="/usr/bin/ccache clang"
+
+      - name: 编译 touch_inject_hidden.ko
+        run: |
+          cd $KERNEL_ROOT
+          BUILD_DIR=$(find out -name ".config" -path "*/common/*" -printf '%h\n' -quit 2>/dev/null || echo "out/android14-6.1/common")
+          if [ ! -f "$BUILD_DIR/.config" ]; then
+            BUILD_DIR="out/android14-6.1/common"
+          fi
+
+          echo "使用 BUILD_DIR: $BUILD_DIR"
+
+          # modules_prepare
+          make -C common O="$BUILD_DIR" ARCH=arm64 LLVM=1 LLVM_IAS=1 modules_prepare
+
+          # 编译外部模块
           make -C common \
-            O="$BAZEL_OUT" \
-            M="$GITHUB_WORKSPACE/touch_inject_hidden/kernel" \
+            O="$BUILD_DIR" \
+            M="${{ github.workspace }}/touch_inject_hidden/kernel" \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-android- \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            LLVM_TOOLCHAIN_PATH="$TOOLCHAIN" \
             modules -j$(nproc)
 
-      - name: Upload .ko artifact
+      - name: 上传 .ko
         uses: actions/upload-artifact@v4
         with:
           name: touch_inject_hidden.ko
-          path: kernel/touch_inject_hidden.ko
+          path: touch_inject_hidden/kernel/touch_inject_hidden.ko
