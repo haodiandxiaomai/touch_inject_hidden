@@ -194,6 +194,21 @@ static inline void send_report(int x, int y, bool touching)
 }
 
 /*
+ * 列出所有输入设备（调试用）
+ */
+static inline int list_input_devices(struct device *dev, void *data)
+{
+    struct input_dev *input = to_input_dev(dev);
+    pr_info("vtouch: device '%s' EV=%lx ABS=%lx KEY=%lx mt=%px\n",
+            input->name ?: "?",
+            input->evbit[0],
+            input->absbit[0],
+            input->keybit[0],
+            input->mt);
+    return 0;
+}
+
+/*
  * 匹配触摸屏设备
  * 判断条件：支持 EV_ABS + ABS_MT_SLOT + BTN_TOUCH + 有 input_mt 结构体
  */
@@ -210,6 +225,13 @@ static inline int match_touchscreen(struct device *dev, void *data)
         *result = input;
         return 1;
     }
+    /* 打印每个被检查的设备 */
+    pr_info("vtouch: check '%s' EV_ABS=%d MT_SLOT=%d BTN_TOUCH=%d mt=%px\n",
+            input->name ?: "?",
+            test_bit(EV_ABS, input->evbit),
+            test_bit(ABS_MT_SLOT, input->absbit),
+            test_bit(BTN_TOUCH, input->keybit),
+            input->mt);
     return 0;
 }
 
@@ -262,26 +284,30 @@ static inline int v_touch_init(int *max_x, int *max_y)
     input_class = (struct class *)generic_kallsyms_lookup_name("input_class");
     if (!input_class)
     {
-        pr_debug("vtouch: input_class 查找失败\n");
+        pr_info("vtouch: input_class 查找失败\n");
         return -EFAULT;
     }
+    pr_info("vtouch: input_class=%px\n", input_class);
 
     /* 遍历输入设备找到触摸屏 */
     class_for_each_device(input_class, NULL, &found, match_touchscreen);
     if (!found)
     {
-        pr_debug("vtouch: 未找到触摸屏设备\n");
+        pr_info("vtouch: 未找到触摸屏设备，尝试列出所有输入设备:\n");
+        /* 列出所有输入设备 */
+        class_for_each_device(input_class, NULL, NULL, list_input_devices);
         return -ENODEV;
     }
 
     get_device(&found->dev);
     vt.dev = found;
+    pr_info("vtouch: 找到触摸屏 '%s', slots=%d\n", found->name ?: "?", found->mt ? found->mt->num_slots : -1);
 
     /* 劫持 MT 结构体 */
     ret = hijack_init_slots(found);
     if (ret)
     {
-        pr_debug("vtouch: MT 劫持失败\n");
+        pr_info("vtouch: MT 劫持失败, ret=%d\n", ret);
         put_device(&found->dev);
         vt.dev = NULL;
         return ret;
