@@ -113,7 +113,7 @@ jobs:
           echo "=== 同步完成，目录内容 ==="
           ls -la | head -20
 
-      - name: 编译内核
+      - name: 编译内核 (Bazel)
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 30
@@ -121,35 +121,22 @@ jobs:
           retry_on: timeout
           command: |
             cd $KERNEL_ROOT
-            # 禁用 system DLKM 和 KMI 严格模式
-            sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' ./common/build.config.gki.aarch64
-            sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' ./common/build.config.gki.aarch64
             sed -i 's/check_defconfig//' ./common/build.config.gki
-
-            LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 \
-              build/build.sh CC="/usr/bin/ccache clang"
+            tools/bazel build --disk_cache=$HOME/.cache/bazel               --config=fast --lto=thin               //common:kernel_aarch64 //common:kernel_aarch64_modules_prepare
 
       - name: 编译 touch_inject_hidden.ko
         run: |
           cd $KERNEL_ROOT
-          BUILD_DIR=$(find out -name ".config" -path "*/common/*" -printf '%h\n' -quit 2>/dev/null || echo "out/android14-6.1/common")
-          if [ ! -f "$BUILD_DIR/.config" ]; then
-            BUILD_DIR="out/android14-6.1/common"
+          BAZEL_OUT=$(readlink -f bazel-bin/common/kernel_aarch64)
+
+          # 解压 modules_prepare
+          if [ -f "$BAZEL_OUT/../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz" ]; then
+            cd "$BAZEL_OUT"
+            tar -xzf ../kernel_aarch64_modules_prepare/modules_prepare_outdir.tar.gz
+            cd $KERNEL_ROOT
           fi
 
-          echo "使用 BUILD_DIR: $BUILD_DIR"
-
-          # modules_prepare
-          make -C common O="$BUILD_DIR" ARCH=arm64 LLVM=1 LLVM_IAS=1 modules_prepare
-
-          # 编译外部模块
-          make -C common \
-            O="$BUILD_DIR" \
-            M="${{ github.workspace }}/touch_inject_hidden/kernel" \
-            ARCH=arm64 \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            modules -j$(nproc)
+          make -C common             O="$BAZEL_OUT"             M="${{ github.workspace }}/touch_inject_hidden/kernel"             ARCH=arm64             LLVM=1             LLVM_IAS=1             modules -j$(nproc)
 
       - name: 上传 .ko
         uses: actions/upload-artifact@v4
