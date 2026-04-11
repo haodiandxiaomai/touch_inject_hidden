@@ -1,0 +1,24 @@
+# 编译产物
+*.o
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.order
+*.symvers
+*.cmd
+.tmp_versions/
+
+# 用户程序编译产物
+touch_test
+
+# 编辑器
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db
