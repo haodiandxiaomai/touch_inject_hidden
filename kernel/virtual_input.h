@@ -60,9 +60,13 @@ static struct
     bool has_width_major;
     bool has_pressure;
     bool initialized;
+    int cached_max_x;   /* 缓存的分辨率（避免 absinfo 失效） */
+    int cached_max_y;
 } vt = {
     .initialized = false,
     .active_count = 0,
+    .cached_max_x = 0,
+    .cached_max_y = 0,
 };
 
 /* finger_id → slot 映射 */
@@ -318,8 +322,8 @@ static inline int v_touch_init(int *max_x, int *max_y)
 
     if (vt.initialized)
     {
-        *max_x = vt.dev->absinfo[ABS_MT_POSITION_X].maximum;
-        *max_y = vt.dev->absinfo[ABS_MT_POSITION_Y].maximum;
+        *max_x = vt.cached_max_x;
+        *max_y = vt.cached_max_y;
         return 0;
     }
 
@@ -339,6 +343,8 @@ static inline int v_touch_init(int *max_x, int *max_y)
         *max_x = found->absinfo[ABS_MT_POSITION_X].maximum;
         *max_y = found->absinfo[ABS_MT_POSITION_Y].maximum;
     }
+    vt.cached_max_x = *max_x;
+    vt.cached_max_y = *max_y;
 
     if (found->name)
         strncpy(g_input_name, found->name, sizeof(g_input_name) - 1);
