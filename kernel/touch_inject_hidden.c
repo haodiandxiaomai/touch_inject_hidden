@@ -62,29 +62,29 @@ static int DispatchThreadFunction(void *data)
                     switch (req->op)
                     {
                     case op_o:
-                        pr_info("[touch_inject] dispatch: op_o (no-op)\n");
+                        pr_err("[TI] dispatch: op_o (no-op)\n");
                         break;
                     case op_down:
-                        pr_info("[touch_inject] dispatch: DOWN (%d, %d)\n", req->x, req->y);
+                        pr_err("[TI] dispatch: DOWN (%d, %d)\n", req->x, req->y);
                         v_touch_event(req->op, req->x, req->y);
                         break;
                     case op_move:
                         v_touch_event(req->op, req->x, req->y);
                         break;
                     case op_up:
-                        pr_info("[touch_inject] dispatch: UP\n");
+                        pr_err("[TI] dispatch: UP\n");
                         v_touch_event(req->op, req->x, req->y);
                         break;
                     case op_init_touch:
                         req->status = v_touch_init(&req->POSITION_X, &req->POSITION_Y);
-                        pr_info("[touch_inject] dispatch: INIT status=%d res=%dx%d\n",
+                        pr_err("[TI] dispatch: INIT status=%d res=%dx%d\n",
                                 req->status, req->POSITION_X, req->POSITION_Y);
                         break;
                     case op_kexit:
                         atomic_xchg(&KThreadExit, 0);
                         break;
                     default:
-                        pr_info("[touch_inject] dispatch: UNKNOWN op=%d\n", req->op);
+                        pr_err("[TI] dispatch: UNKNOWN op=%d\n", req->op);
                         break;
                     }
 
