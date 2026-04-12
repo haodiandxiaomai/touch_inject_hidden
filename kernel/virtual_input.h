@@ -1,9 +1,10 @@
 /*
- * virtual_input.h — 虚拟触摸注入（直接复刻 lsdriver）
+ * virtual_input.h — 虚拟触摸注入（多指版，最大 6 指）
  *
- * 来源: https://github.com/lsnbm/Linux-android-arm64
- * 原理: 劫持 MT 结构体，扩容到 10 个 slot（物理 0-8，虚拟 9）
- *       隐藏 slot 9 不让物理驱动看到，通过临时切换 num_slots 实现
+ * 复刻自 lsdriver，扩展为多指支持
+ * Slot 分配：
+ *   物理手指：slot 0-3（4 个）
+ *   虚拟手指：slot 4-9（6 个，finger_id 0-5 → slot 4-9）
  */
 
 #ifndef VIRTUAL_INPUT_H
@@ -21,9 +22,9 @@
 #include "io_struct.h"
 
 #define VTOUCH_TRACKING_ID_BASE 40000
-#define TARGET_SLOT_IDX 9
-#define PHYSICAL_SLOTS 9
-#define TOTAL_SLOTS 10
+#define PHYSICAL_SLOTS 4
+#define VIRTUAL_SLOTS 6
+#define TOTAL_SLOTS (PHYSICAL_SLOTS + VIRTUAL_SLOTS)  /* 10 */
 
 /* 调试统计 */
 static atomic_t g_send_count = ATOMIC_INIT(0);
@@ -34,20 +35,36 @@ static int g_input_key_bits = 0;
 static int g_mt_num_slots = 0;
 static char g_input_name[64] = "unknown";
 
+/* 每个虚拟手指的状态 */
+struct virtual_finger {
+    int tracking_id;  /* -1 = 未使用, >= 0 = 活跃 */
+    int x;
+    int y;
+};
+
 static struct
 {
     struct input_dev *dev;
     struct input_mt *original_mt;
     struct input_mt *hijacked_mt;
-    int tracking_id;
+    struct virtual_finger fingers[VIRTUAL_SLOTS];
+    int active_count;   /* 当前活跃虚拟手指数 */
     bool has_touch_major;
     bool has_width_major;
     bool has_pressure;
     bool initialized;
 } vt = {
-    .tracking_id = -1,
     .initialized = false,
+    .active_count = 0,
 };
+
+/* finger_id → slot 映射 */
+static inline int finger_to_slot(int finger_id)
+{
+    if (finger_id < 0 || finger_id >= VIRTUAL_SLOTS)
+        return -1;
+    return PHYSICAL_SLOTS + finger_id;  /* finger 0 → slot 4, finger 5 → slot 9 */
+}
 
 static inline int hijack_init_slots(struct input_dev *dev)
 {
@@ -93,33 +110,36 @@ static inline int hijack_init_slots(struct input_dev *dev)
     vt.hijacked_mt = new_mt;
     dev->mt = new_mt;
 
-    input_set_abs_params(dev, ABS_MT_SLOT, 0, TOTAL_SLOTS, 0, 0);
+    input_set_abs_params(dev, ABS_MT_SLOT, 0, TOTAL_SLOTS - 1, 0, 0);
 
     return 0;
 }
 
-static inline void update_global_keys(bool virtual_touching)
+/* 统计物理+虚拟手指总数并更新全局按键 */
+static inline void update_global_keys(void)
 {
     struct input_dev *dev = vt.dev;
     struct input_mt *mt = dev->mt;
     int count = 0;
     int i;
 
+    /* 物理手指 */
     for (i = 0; i < PHYSICAL_SLOTS; i++)
     {
         if (input_mt_get_value(&mt->slots[i], ABS_MT_TRACKING_ID) != -1)
             count++;
     }
 
-    if (virtual_touching)
-        count++;
+    /* 虚拟手指 */
+    count += vt.active_count;
 
     input_report_key(dev, BTN_TOUCH, count > 0);
     input_report_key(dev, BTN_TOOL_FINGER, count == 1);
     input_report_key(dev, BTN_TOOL_DOUBLETAP, count >= 2);
 }
 
-static inline void send_report(int x, int y, bool touching)
+/* 发送单个虚拟手指的报告 */
+static inline void send_finger_report(int slot, int x, int y, bool touching)
 {
     struct input_dev *dev = vt.dev;
     struct input_mt *mt = dev->mt;
@@ -137,7 +157,8 @@ static inline void send_report(int x, int y, bool touching)
     old_slot = dev->absinfo[ABS_MT_SLOT].value;
 
     mt->num_slots = TOTAL_SLOTS;
-    input_event(dev, EV_ABS, ABS_MT_SLOT, TARGET_SLOT_IDX);
+
+    input_event(dev, EV_ABS, ABS_MT_SLOT, slot);
     input_mt_report_slot_state(dev, MT_TOOL_FINGER, touching);
 
     if (likely(touching))
@@ -154,12 +175,72 @@ static inline void send_report(int x, int y, bool touching)
 
     mt->num_slots = PHYSICAL_SLOTS;
     input_event(dev, EV_ABS, ABS_MT_SLOT, old_slot);
-    update_global_keys(touching);
+
+    local_irq_restore(flags);
+}
+
+/* 刷新所有虚拟手指到 input 子系统 */
+static inline void flush_virtual_fingers(void)
+{
+    struct input_dev *dev = vt.dev;
+    struct input_mt *mt = dev->mt;
+    int old_slot;
+    unsigned long flags;
+    int i;
+
+    if (!dev || !mt)
+        return;
+
+    local_irq_save(flags);
+
+    old_slot = dev->absinfo[ABS_MT_SLOT].value;
+    mt->num_slots = TOTAL_SLOTS;
+
+    for (i = 0; i < VIRTUAL_SLOTS; i++)
+    {
+        int slot = finger_to_slot(i);
+        input_event(dev, EV_ABS, ABS_MT_SLOT, slot);
+        input_mt_report_slot_state(dev, MT_TOOL_FINGER, vt.fingers[i].tracking_id != -1);
+        if (vt.fingers[i].tracking_id != -1)
+        {
+            input_event(dev, EV_ABS, ABS_MT_POSITION_X, vt.fingers[i].x);
+            input_event(dev, EV_ABS, ABS_MT_POSITION_Y, vt.fingers[i].y);
+            if (vt.has_touch_major)
+                input_event(dev, EV_ABS, ABS_MT_TOUCH_MAJOR, 10);
+            if (vt.has_width_major)
+                input_event(dev, EV_ABS, ABS_MT_WIDTH_MAJOR, 10);
+            if (vt.has_pressure)
+                input_event(dev, EV_ABS, ABS_MT_PRESSURE, 60);
+        }
+    }
+
+    mt->num_slots = PHYSICAL_SLOTS;
+    input_event(dev, EV_ABS, ABS_MT_SLOT, old_slot);
+
+    update_global_keys();
     input_sync(dev);
 
     local_irq_restore(flags);
 
     atomic_inc(&g_send_count);
+}
+
+/* 兼容旧版单指接口 */
+static inline void send_report(int x, int y, bool touching)
+{
+    if (touching)
+    {
+        vt.fingers[0].x = x;
+        vt.fingers[0].y = y;
+        vt.fingers[0].tracking_id = VTOUCH_TRACKING_ID_BASE;
+        vt.active_count = 1;
+    }
+    else
+    {
+        vt.fingers[0].tracking_id = -1;
+        vt.active_count = 0;
+    }
+    flush_virtual_fingers();
 }
 
 static inline int match_touchscreen(struct device *dev, void *data)
@@ -197,6 +278,7 @@ static inline int v_touch_init(int *max_x, int *max_y)
     struct input_dev *found = NULL;
     struct class *input_class;
     int ret = 0;
+    int i;
 
     if (!max_x || !max_y)
         return -EINVAL;
@@ -228,7 +310,6 @@ static inline int v_touch_init(int *max_x, int *max_y)
         *max_y = found->absinfo[ABS_MT_POSITION_Y].maximum;
     }
 
-    /* 保存设备信息到 /proc */
     if (found->name)
         strncpy(g_input_name, found->name, sizeof(g_input_name) - 1);
     g_input_ev_bits = found->evbit[0];
@@ -247,6 +328,15 @@ static inline int v_touch_init(int *max_x, int *max_y)
     vt.has_touch_major = test_bit(ABS_MT_TOUCH_MAJOR, found->absbit);
     vt.has_width_major = test_bit(ABS_MT_WIDTH_MAJOR, found->absbit);
     vt.has_pressure = test_bit(ABS_MT_PRESSURE, found->absbit);
+
+    /* 初始化所有虚拟手指为未使用 */
+    for (i = 0; i < VIRTUAL_SLOTS; i++)
+    {
+        vt.fingers[i].tracking_id = -1;
+        vt.fingers[i].x = 0;
+        vt.fingers[i].y = 0;
+    }
+    vt.active_count = 0;
     vt.initialized = true;
 
     return 0;
@@ -254,17 +344,19 @@ static inline int v_touch_init(int *max_x, int *max_y)
 
 static inline void v_touch_destroy(void)
 {
+    int i;
+
     if (!vt.initialized)
         return;
 
     if (vt.dev)
         unlock_global_keys(vt.dev);
 
-    if (vt.tracking_id != -1)
-    {
-        vt.tracking_id = -1;
-        send_report(0, 0, false);
-    }
+    /* 抬起所有虚拟手指 */
+    for (i = 0; i < VIRTUAL_SLOTS; i++)
+        vt.fingers[i].tracking_id = -1;
+    vt.active_count = 0;
+    flush_virtual_fingers();
 
     if (vt.dev && vt.original_mt)
     {
@@ -288,9 +380,9 @@ static inline void v_touch_destroy(void)
 
     vt.original_mt = NULL;
     vt.initialized = false;
-    vt.tracking_id = -1;
 }
 
+/* 旧版单指事件（兼容） */
 static inline void v_touch_event(enum sm_req_op op, int x, int y)
 {
     if (unlikely(!vt.initialized))
@@ -298,26 +390,89 @@ static inline void v_touch_event(enum sm_req_op op, int x, int y)
 
     if (likely(op == op_move))
     {
-        if (likely(vt.tracking_id != -1))
-            send_report(x, y, true);
+        if (likely(vt.fingers[0].tracking_id != -1))
+        {
+            vt.fingers[0].x = x;
+            vt.fingers[0].y = y;
+            flush_virtual_fingers();
+        }
     }
     else if (op == op_down)
     {
-        if (vt.tracking_id == -1)
+        if (vt.fingers[0].tracking_id == -1)
         {
-            vt.tracking_id = VTOUCH_TRACKING_ID_BASE;
+            vt.fingers[0].tracking_id = VTOUCH_TRACKING_ID_BASE;
+            vt.fingers[0].x = x;
+            vt.fingers[0].y = y;
+            vt.active_count = 1;
             unlock_global_keys(vt.dev);
-            send_report(x, y, true);
+            flush_virtual_fingers();
             lock_global_keys(vt.dev);
         }
     }
     else if (op == op_up)
     {
-        if (vt.tracking_id != -1)
+        if (vt.fingers[0].tracking_id != -1)
         {
-            vt.tracking_id = -1;
+            vt.fingers[0].tracking_id = -1;
+            vt.active_count = 0;
             unlock_global_keys(vt.dev);
-            send_report(0, 0, false);
+            flush_virtual_fingers();
+        }
+    }
+}
+
+/* 新版多指事件 */
+static inline void v_touch_multi_event(enum sm_req_op op, int finger_id, int x, int y)
+{
+    int slot;
+
+    if (unlikely(!vt.initialized))
+        return;
+
+    if (finger_id < 0 || finger_id >= VIRTUAL_SLOTS)
+        return;
+
+    slot = finger_to_slot(finger_id);
+
+    if (op == op_multi_down)
+    {
+        if (vt.fingers[finger_id].tracking_id == -1)
+        {
+            vt.fingers[finger_id].tracking_id = VTOUCH_TRACKING_ID_BASE + finger_id;
+            vt.fingers[finger_id].x = x;
+            vt.fingers[finger_id].y = y;
+            vt.active_count++;
+            unlock_global_keys(vt.dev);
+            flush_virtual_fingers();
+            lock_global_keys(vt.dev);
+        }
+        else
+        {
+            /* 已按下，更新坐标 */
+            vt.fingers[finger_id].x = x;
+            vt.fingers[finger_id].y = y;
+            flush_virtual_fingers();
+        }
+    }
+    else if (op == op_multi_move)
+    {
+        if (vt.fingers[finger_id].tracking_id != -1)
+        {
+            vt.fingers[finger_id].x = x;
+            vt.fingers[finger_id].y = y;
+            flush_virtual_fingers();
+        }
+    }
+    else if (op == op_multi_up)
+    {
+        if (vt.fingers[finger_id].tracking_id != -1)
+        {
+            vt.fingers[finger_id].tracking_id = -1;
+            vt.active_count--;
+            if (vt.active_count < 0) vt.active_count = 0;
+            unlock_global_keys(vt.dev);
+            flush_virtual_fingers();
         }
     }
 }
