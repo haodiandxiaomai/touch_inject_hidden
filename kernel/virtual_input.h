@@ -29,11 +29,18 @@
 /* 调试统计 */
 static atomic_t g_send_count = ATOMIC_INIT(0);
 static atomic_t g_send_errors = ATOMIC_INIT(0);
+static atomic_t g_flush_count = ATOMIC_INIT(0);   /* flush_virtual_fingers 调用次数 */
+static atomic_t g_report_count = ATOMIC_INIT(0);  /* send_finger_report 调用次数 */
+static atomic_t g_sync_count = ATOMIC_INIT(0);    /* input_sync 执行次数 */
 static int g_input_ev_bits = 0;
 static int g_input_abs_bits = 0;
 static int g_input_key_bits = 0;
 static int g_mt_num_slots = 0;
 static char g_input_name[64] = "unknown";
+static int g_vt_dev_null = 0;    /* 1 if vt.dev==NULL at flush time */
+static int g_vt_mt_null = 0;     /* 1 if vt.dev->mt==NULL at flush time */
+static int g_last_slot = -1;     /* 最后写入的 MT_SLOT 值 */
+static int g_mt_num_at_sync = -1; /* sync 时 mt->num_slots 的值 */
 
 /* 每个虚拟手指的状态 */
 struct virtual_finger {
@@ -142,15 +149,19 @@ static inline void update_global_keys(void)
 static inline void send_finger_report(int slot, int x, int y, bool touching)
 {
     struct input_dev *dev = vt.dev;
-    struct input_mt *mt = dev->mt;
+    struct input_mt *mt;
     int old_slot;
     unsigned long flags;
 
-    if (!dev || !mt)
+    atomic_inc(&g_report_count);
+
+    if (!dev || !dev->mt)
     {
         atomic_inc(&g_send_errors);
         return;
     }
+
+    mt = dev->mt;
 
     local_irq_save(flags);
 
@@ -183,13 +194,29 @@ static inline void send_finger_report(int slot, int x, int y, bool touching)
 static inline void flush_virtual_fingers(void)
 {
     struct input_dev *dev = vt.dev;
-    struct input_mt *mt = dev->mt;
+    struct input_mt *mt;
     int old_slot;
     unsigned long flags;
     int i;
 
-    if (!dev || !mt)
+    atomic_inc(&g_flush_count);
+
+    if (!dev)
+    {
+        g_vt_dev_null = 1;
+        atomic_inc(&g_send_errors);
         return;
+    }
+    g_vt_dev_null = 0;
+
+    mt = dev->mt;
+    if (!mt)
+    {
+        g_vt_mt_null = 1;
+        atomic_inc(&g_send_errors);
+        return;
+    }
+    g_vt_mt_null = 0;
 
     local_irq_save(flags);
 
@@ -216,9 +243,12 @@ static inline void flush_virtual_fingers(void)
 
     mt->num_slots = PHYSICAL_SLOTS;
     input_event(dev, EV_ABS, ABS_MT_SLOT, old_slot);
+    g_last_slot = old_slot;
 
     update_global_keys();
+    g_mt_num_at_sync = mt->num_slots;
     input_sync(dev);
+    atomic_inc(&g_sync_count);
 
     local_irq_restore(flags);
 
