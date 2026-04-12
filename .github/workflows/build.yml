@@ -173,8 +173,18 @@ jobs:
           ls -la "$DRIVER_SRC/touch_inject_hidden.ko"
           file "$DRIVER_SRC/touch_inject_hidden.ko"
 
-      - name: 上传 touch_inject_hidden.ko
+      - name: 交叉编译用户态工具
+        run: |
+          USER_SRC="$GITHUB_WORKSPACE/touch_inject_hidden/user"
+          aarch64-linux-gnu-gcc -static -O2 -o "$USER_SRC/touch_inject" "$USER_SRC/main.c"
+          echo "=== 用户态工具 ==="
+          ls -la "$USER_SRC/touch_inject"
+          file "$USER_SRC/touch_inject"
+
+      - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: touch_inject_hidden-6.1.128-ko
-          path: touch_inject_hidden/kernel/touch_inject_hidden.ko
+          name: touch_inject_hidden-6.1.128
+          path: |
+            touch_inject_hidden/kernel/touch_inject_hidden.ko
+            touch_inject_hidden/user/touch_inject
