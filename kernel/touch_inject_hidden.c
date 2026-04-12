@@ -276,10 +276,8 @@ static int handler_pre(struct kprobe *p, struct pt_regs *regs)
     /* 匹配进程名（comm 最长 15 字符，包名可能被截断） */
     if (__builtin_strstr(task->comm, "ls") != NULL || __builtin_strstr(task->comm, "LS") != NULL)
     {
-        pr_debug("【进程监听】检测到 LS 进程即将退出！PID: %d, comm: %s\n", task->pid, task->comm);
-
         atomic_xchg(&ProcessExit, 0);   /* 标记用户进程已断开 */
-        v_touch_destroy();               /* 清理触摸资源 */
+        /* 不再调用 v_touch_destroy() — 保留虚拟触摸状态 */
     }
 
     return 0;
