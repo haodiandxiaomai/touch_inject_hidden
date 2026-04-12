@@ -54,7 +54,14 @@ static int proc_touch_inject_show(struct seq_file *m, void *v)
     seq_printf(m, "init_called:     %d\n", atomic_read(&g_init_called));
     seq_printf(m, "init_result:     %d\n", atomic_read(&g_init_result));
     seq_printf(m, "dispatch_count:  %d\n", atomic_read(&g_dispatch_count));
+    seq_printf(m, "send_count:      %d\n", atomic_read(&g_send_count));
+    seq_printf(m, "send_errors:     %d\n", atomic_read(&g_send_errors));
     seq_printf(m, "resolution:      %dx%d\n", g_max_x, g_max_y);
+    seq_printf(m, "input_dev:       %s\n", g_input_name);
+    seq_printf(m, "evbit:           0x%x\n", g_input_ev_bits);
+    seq_printf(m, "absbit:          0x%x\n", g_input_abs_bits);
+    seq_printf(m, "keybit:          0x%x\n", g_input_key_bits);
+    seq_printf(m, "mt_num_slots:    %d\n", g_mt_num_slots);
     seq_printf(m, "req_ptr:         %px\n", req);
     if (req)
     {
