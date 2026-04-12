@@ -20,13 +20,20 @@
 
 #include "io_struct.h"
 
-/* 配置 */
 #define VTOUCH_TRACKING_ID_BASE 40000
 #define TARGET_SLOT_IDX 9
 #define PHYSICAL_SLOTS 9
 #define TOTAL_SLOTS 10
 
-/* 虚拟触摸上下文 */
+/* 调试统计 */
+static atomic_t g_send_count = ATOMIC_INIT(0);
+static atomic_t g_send_errors = ATOMIC_INIT(0);
+static int g_input_ev_bits = 0;
+static int g_input_abs_bits = 0;
+static int g_input_key_bits = 0;
+static int g_mt_num_slots = 0;
+static char g_input_name[64] = "unknown";
+
 static struct
 {
     struct input_dev *dev;
@@ -42,10 +49,6 @@ static struct
     .initialized = false,
 };
 
-/*
- * 扩容并初始化 MT 结构体
- * 策略：确保存储空间足够 10 个 Slot，但默认只告诉驱动有 9 个
- */
 static inline int hijack_init_slots(struct input_dev *dev)
 {
     struct input_mt *old_mt = dev->mt;
@@ -95,9 +98,6 @@ static inline int hijack_init_slots(struct input_dev *dev)
     return 0;
 }
 
-/*
- * 统计当前所有活跃的手指（物理 + 虚拟）并更新全局按键
- */
 static inline void update_global_keys(bool virtual_touching)
 {
     struct input_dev *dev = vt.dev;
@@ -119,9 +119,6 @@ static inline void update_global_keys(bool virtual_touching)
     input_report_key(dev, BTN_TOOL_DOUBLETAP, count >= 2);
 }
 
-/*
- * 发送虚拟触摸报告（复刻 lsdriver）
- */
 static inline void send_report(int x, int y, bool touching)
 {
     struct input_dev *dev = vt.dev;
@@ -131,7 +128,7 @@ static inline void send_report(int x, int y, bool touching)
 
     if (!dev || !mt)
     {
-        pr_err("[touch_inject] send_report: dev=%px mt=%px — 无效\n", dev, mt);
+        atomic_inc(&g_send_errors);
         return;
     }
 
@@ -139,20 +136,14 @@ static inline void send_report(int x, int y, bool touching)
 
     old_slot = dev->absinfo[ABS_MT_SLOT].value;
 
-    /* 瞬间开启 Slot 9 */
     mt->num_slots = TOTAL_SLOTS;
-
-    /* 选中 Slot 9 */
     input_event(dev, EV_ABS, ABS_MT_SLOT, TARGET_SLOT_IDX);
-
-    /* 报告状态 */
     input_mt_report_slot_state(dev, MT_TOOL_FINGER, touching);
 
     if (likely(touching))
     {
         input_event(dev, EV_ABS, ABS_MT_POSITION_X, x);
         input_event(dev, EV_ABS, ABS_MT_POSITION_Y, y);
-
         if (vt.has_touch_major)
             input_event(dev, EV_ABS, ABS_MT_TOUCH_MAJOR, 10);
         if (vt.has_width_major)
@@ -161,27 +152,16 @@ static inline void send_report(int x, int y, bool touching)
             input_event(dev, EV_ABS, ABS_MT_PRESSURE, 60);
     }
 
-    /* 瞬间关闭 Slot 9 */
     mt->num_slots = PHYSICAL_SLOTS;
-
-    /* 恢复 slot */
     input_event(dev, EV_ABS, ABS_MT_SLOT, old_slot);
-
-    /* 更新全局按键 */
     update_global_keys(touching);
-
-    /* 提交总帧 */
     input_sync(dev);
 
     local_irq_restore(flags);
 
-    pr_err("[TI] SEND: %s (%d,%d) slot=%d->%d\n",
-            touching ? "TOUCH" : "RELEASE", x, y, old_slot, TARGET_SLOT_IDX);
+    atomic_inc(&g_send_count);
 }
 
-/*
- * 匹配触摸屏设备
- */
 static inline int match_touchscreen(struct device *dev, void *data)
 {
     struct input_dev *input = to_input_dev(dev);
@@ -198,7 +178,6 @@ static inline int match_touchscreen(struct device *dev, void *data)
     return 0;
 }
 
-/* 锁定按键：剥夺设备发送全局触摸状态的能力 */
 static inline void lock_global_keys(struct input_dev *dev)
 {
     clear_bit(BTN_TOUCH, dev->keybit);
@@ -206,7 +185,6 @@ static inline void lock_global_keys(struct input_dev *dev)
     clear_bit(BTN_TOOL_DOUBLETAP, dev->keybit);
 }
 
-/* 解锁按键：恢复设备发送全局触摸状态的能力 */
 static inline void unlock_global_keys(struct input_dev *dev)
 {
     set_bit(BTN_TOUCH, dev->keybit);
@@ -235,57 +213,41 @@ static inline int v_touch_init(int *max_x, int *max_y)
 
     input_class = (struct class *)generic_kallsyms_lookup_name("input_class");
     if (!input_class)
-    {
-        pr_err("[TI] FATAL: input_class lookup failed\n");
         return -EFAULT;
-    }
-    pr_err("[TI] input_class=%px\n", input_class);
 
     class_for_each_device(input_class, NULL, &found, match_touchscreen);
-    pr_err("[TI] match_touchscreen: found=%px\n", found);
-
     if (!found)
-    {
-        pr_err("[TI] FATAL: no touchscreen found\n");
         return -ENODEV;
-    }
-
-    pr_err("[TI] device name=%s, absinfo=%px\n",
-           found->name ? found->name : "null", found->absinfo);
 
     get_device(&found->dev);
     vt.dev = found;
 
-    /* 读分辨率（hijack 之前） */
     if (found->absinfo)
     {
         *max_x = found->absinfo[ABS_MT_POSITION_X].maximum;
         *max_y = found->absinfo[ABS_MT_POSITION_Y].maximum;
-        pr_err("[TI] raw max=%dx%d, mt->num_slots=%d\n",
-               *max_x, *max_y, found->mt ? found->mt->num_slots : -1);
     }
-    else
-    {
-        pr_err("[TI] FATAL: absinfo is NULL!\n");
-    }
+
+    /* 保存设备信息到 /proc */
+    if (found->name)
+        strncpy(g_input_name, found->name, sizeof(g_input_name) - 1);
+    g_input_ev_bits = found->evbit[0];
+    g_input_abs_bits = found->absbit[0];
+    g_input_key_bits = found->keybit[0];
+    g_mt_num_slots = found->mt ? found->mt->num_slots : -1;
 
     ret = hijack_init_slots(found);
     if (ret)
     {
-        pr_err("[TI] hijack_init_slots failed: %d\n", ret);
         put_device(&found->dev);
         vt.dev = NULL;
         return ret;
     }
-    pr_err("[TI] hijack OK, new num_slots=%d\n", found->mt ? found->mt->num_slots : -1);
 
     vt.has_touch_major = test_bit(ABS_MT_TOUCH_MAJOR, found->absbit);
     vt.has_width_major = test_bit(ABS_MT_WIDTH_MAJOR, found->absbit);
     vt.has_pressure = test_bit(ABS_MT_PRESSURE, found->absbit);
     vt.initialized = true;
-
-    pr_err("[TI] INIT DONE: max=%dx%d, mt=%px, evbit=0x%lx, absbit=0x%lx\n",
-           *max_x, *max_y, found->mt, found->evbit[0], found->absbit[0]);
 
     return 0;
 }
