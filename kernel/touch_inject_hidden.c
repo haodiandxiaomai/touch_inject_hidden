@@ -23,6 +23,8 @@
 #include <linux/list.h>
 #include <linux/kobject.h>
 #include <linux/kallsyms.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 
 #include "io_struct.h"
 #include "export_fun.h"
@@ -35,6 +37,48 @@ static struct req_obj *req = NULL;
 static atomic_t ProcessExit = ATOMIC_INIT(0);
 /* 内核线程状态: 1 = 运行中, 0 = 退出 */
 static atomic_t KThreadExit = ATOMIC_INIT(1);
+
+/* 调试状态 */
+static atomic_t g_init_called = ATOMIC_INIT(0);
+static atomic_t g_init_result = ATOMIC_INIT(-1);
+static atomic_t g_dispatch_count = ATOMIC_INIT(0);
+static int g_max_x = 0, g_max_y = 0;
+
+/* /proc/touch_inject — 用户态可读的调试信息 */
+static int proc_touch_inject_show(struct seq_file *m, void *v)
+{
+    seq_printf(m, "touch_inject_hidden debug info\n");
+    seq_printf(m, "==============================\n");
+    seq_printf(m, "connected:       %d\n", atomic_read(&ProcessExit));
+    seq_printf(m, "kthread_running: %d\n", atomic_read(&KThreadExit));
+    seq_printf(m, "init_called:     %d\n", atomic_read(&g_init_called));
+    seq_printf(m, "init_result:     %d\n", atomic_read(&g_init_result));
+    seq_printf(m, "dispatch_count:  %d\n", atomic_read(&g_dispatch_count));
+    seq_printf(m, "resolution:      %dx%d\n", g_max_x, g_max_y);
+    seq_printf(m, "req_ptr:         %px\n", req);
+    if (req)
+    {
+        seq_printf(m, "req.kernel:      %d\n", req->kernel);
+        seq_printf(m, "req.user:        %d\n", req->user);
+        seq_printf(m, "req.op:          %d\n", req->op);
+        seq_printf(m, "req.status:      %d\n", req->status);
+        seq_printf(m, "req.POSITION_X:  %d\n", req->POSITION_X);
+        seq_printf(m, "req.POSITION_Y:  %d\n", req->POSITION_Y);
+    }
+    return 0;
+}
+
+static int proc_touch_inject_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, proc_touch_inject_show, NULL);
+}
+
+static const struct proc_ops proc_touch_inject_ops = {
+    .proc_open = proc_touch_inject_open,
+    .proc_read = seq_read,
+    .proc_lseek = seq_lseek,
+    .proc_release = single_release,
+};
 
 /*
  * 调度线程 — 轮询共享内存中的请求并分发处理
@@ -62,34 +106,24 @@ static int DispatchThreadFunction(void *data)
                     switch (req->op)
                     {
                     case op_o:
-                        pr_err("[TI] dispatch: op_o (no-op)\n");
                         break;
                     case op_down:
-                        pr_err("[TI] dispatch: DOWN (%d, %d)\n", req->x, req->y);
-                        v_touch_event(req->op, req->x, req->y);
-                        break;
                     case op_move:
-                        v_touch_event(req->op, req->x, req->y);
-                        break;
                     case op_up:
-                        pr_err("[TI] dispatch: UP\n");
+                        atomic_inc(&g_dispatch_count);
                         v_touch_event(req->op, req->x, req->y);
                         break;
                     case op_init_touch:
+                        atomic_inc(&g_init_called);
                         req->status = v_touch_init(&req->POSITION_X, &req->POSITION_Y);
-                        pr_err("[TI] INIT: status=%d res=%dx%d\n",
-                                req->status, req->POSITION_X, req->POSITION_Y);
-                        if (req->status == 0 && (req->POSITION_X == 0 || req->POSITION_Y == 0))
-                        {
-                            pr_err("[TI] INIT BUG: status=0 但分辨率为0! 可能设备 absinfo 有问题\n");
-                            req->status = -ENODEV;
-                        }
+                        atomic_set(&g_init_result, req->status);
+                        g_max_x = req->POSITION_X;
+                        g_max_y = req->POSITION_Y;
                         break;
                     case op_kexit:
                         atomic_xchg(&KThreadExit, 0);
                         break;
                     default:
-                        pr_err("[TI] dispatch: UNKNOWN op=%d\n", req->op);
                         break;
                     }
 
@@ -340,36 +374,22 @@ static int __init touch_inject_hidden_init(void)
     /* 1. 尝试绕过 5.x 系列 CFI */
     bypass_cfi();
 
-    /* 2. 暂时注释掉隐藏功能，用于调试 */
-    /* hide_myself(); */
-    pr_err("[TI] MODULE LOADED (visible mode for debug)\n");
+    /* 2. 创建 /proc/touch_inject 调试入口 */
+    proc_create("touch_inject", 0444, NULL, &proc_touch_inject_ops);
 
     /* 3. 创建连接线程 */
     chf = kthread_run(ConnectThreadFunction, NULL, "C_thread");
     if (IS_ERR(chf))
-    {
-        pr_err("[TI] 创建连接线程失败: %ld\n", PTR_ERR(chf));
         return PTR_ERR(chf);
-    }
-    pr_err("[TI] 连接线程已创建\n");
 
     /* 4. 创建调度线程 */
     dhf = kthread_run(DispatchThreadFunction, NULL, "D_thread");
     if (IS_ERR(dhf))
-    {
-        pr_err("[TI] 创建调度线程失败: %ld\n", PTR_ERR(dhf));
         return PTR_ERR(dhf);
-    }
-    pr_err("[TI] 调度线程已创建\n");
 
     /* 5. 注册 kprobe 监听进程退出 */
     kprobe_do_exit_init();
 
-    /* 6. 暂时注释掉隐藏线程 */
-    /* hide_kthread(chf); */
-    /* hide_kthread(dhf); */
-
-    pr_err("[TI] touch_inject_hidden: 初始化完成（调试模式）\n");
     return 0;
 }
 
