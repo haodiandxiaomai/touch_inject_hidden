@@ -77,8 +77,13 @@ static int DispatchThreadFunction(void *data)
                         break;
                     case op_init_touch:
                         req->status = v_touch_init(&req->POSITION_X, &req->POSITION_Y);
-                        pr_err("[TI] dispatch: INIT status=%d res=%dx%d\n",
+                        pr_err("[TI] INIT: status=%d res=%dx%d\n",
                                 req->status, req->POSITION_X, req->POSITION_Y);
+                        if (req->status == 0 && (req->POSITION_X == 0 || req->POSITION_Y == 0))
+                        {
+                            pr_err("[TI] INIT BUG: status=0 但分辨率为0! 可能设备 absinfo 有问题\n");
+                            req->status = -ENODEV;
+                        }
                         break;
                     case op_kexit:
                         atomic_xchg(&KThreadExit, 0);
