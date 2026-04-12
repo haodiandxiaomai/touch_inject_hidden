@@ -127,6 +127,12 @@ static int DispatchThreadFunction(void *data)
                         g_max_x = req->POSITION_X;
                         g_max_y = req->POSITION_Y;
                         break;
+                    case op_multi_down:
+                    case op_multi_move:
+                    case op_multi_up:
+                        atomic_inc(&g_dispatch_count);
+                        v_touch_multi_event(req->op, req->finger_id, req->x, req->y);
+                        break;
                     case op_kexit:
                         atomic_xchg(&KThreadExit, 0);
                         break;
