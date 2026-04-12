@@ -56,6 +56,18 @@ static int proc_touch_inject_show(struct seq_file *m, void *v)
     seq_printf(m, "dispatch_count:  %d\n", atomic_read(&g_dispatch_count));
     seq_printf(m, "send_count:      %d\n", atomic_read(&g_send_count));
     seq_printf(m, "send_errors:     %d\n", atomic_read(&g_send_errors));
+    seq_printf(m, "flush_count:     %d\n", atomic_read(&g_flush_count));
+    seq_printf(m, "report_count:    %d\n", atomic_read(&g_report_count));
+    seq_printf(m, "sync_count:      %d\n", atomic_read(&g_sync_count));
+    seq_printf(m, "vt_dev_null:     %d\n", g_vt_dev_null);
+    seq_printf(m, "vt_mt_null:      %d\n", g_vt_mt_null);
+    seq_printf(m, "last_slot:       %d\n", g_last_slot);
+    seq_printf(m, "mt_at_sync:      %d\n", g_mt_num_at_sync);
+    seq_printf(m, "active_fingers:  %d\n", vt.active_count);
+    seq_printf(m, "f0_trkid:        %d\n", vt.fingers[0].tracking_id);
+    seq_printf(m, "f1_trkid:        %d\n", vt.fingers[1].tracking_id);
+    seq_printf(m, "vt.dev:          %px\n", vt.dev);
+    seq_printf(m, "vt.mt:           %px\n", vt.dev ? vt.dev->mt : NULL);
     seq_printf(m, "resolution:      %dx%d\n", g_max_x, g_max_y);
     seq_printf(m, "input_dev:       %s\n", g_input_name);
     seq_printf(m, "evbit:           0x%x\n", g_input_ev_bits);
