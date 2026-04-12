@@ -130,7 +130,10 @@ static inline void send_report(int x, int y, bool touching)
     unsigned long flags;
 
     if (!dev || !mt)
+    {
+        pr_err("[touch_inject] send_report: dev=%px mt=%px — 无效\n", dev, mt);
         return;
+    }
 
     local_irq_save(flags);
 
@@ -171,6 +174,10 @@ static inline void send_report(int x, int y, bool touching)
     input_sync(dev);
 
     local_irq_restore(flags);
+
+    pr_info("[touch_inject] send_report: %s (%d,%d) slot=%d->%d num_slots=%d->%d\n",
+            touching ? "TOUCH" : "RELEASE", x, y, old_slot, TARGET_SLOT_IDX,
+            PHYSICAL_SLOTS, TOTAL_SLOTS);
 }
 
 /*
