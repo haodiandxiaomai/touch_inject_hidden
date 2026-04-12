@@ -335,47 +335,36 @@ static int __init touch_inject_hidden_init(void)
     /* 1. 尝试绕过 5.x 系列 CFI */
     bypass_cfi();
 
-    /* 2. 隐藏模块本身 */
-    hide_myself();
+    /* 2. 暂时注释掉隐藏功能，用于调试 */
+    /* hide_myself(); */
+    pr_err("[TI] MODULE LOADED (visible mode for debug)\n");
 
     /* 3. 创建连接线程 */
     chf = kthread_run(ConnectThreadFunction, NULL, "C_thread");
     if (IS_ERR(chf))
     {
-        pr_debug("创建连接线程失败\n");
+        pr_err("[TI] 创建连接线程失败: %ld\n", PTR_ERR(chf));
         return PTR_ERR(chf);
     }
+    pr_err("[TI] 连接线程已创建\n");
 
     /* 4. 创建调度线程 */
     dhf = kthread_run(DispatchThreadFunction, NULL, "D_thread");
     if (IS_ERR(dhf))
     {
-        pr_debug("创建调度线程失败\n");
+        pr_err("[TI] 创建调度线程失败: %ld\n", PTR_ERR(dhf));
         return PTR_ERR(dhf);
     }
+    pr_err("[TI] 调度线程已创建\n");
 
     /* 5. 注册 kprobe 监听进程退出 */
     kprobe_do_exit_init();
 
-    /* 6. 隐藏内核线程 */
-    hide_kthread(chf);
-    hide_kthread(dhf);
+    /* 6. 暂时注释掉隐藏线程 */
+    /* hide_kthread(chf); */
+    /* hide_kthread(dhf); */
 
-    /* detach_pid 尝试（注释掉：线程运行起来没身份会死机，暂无法解决） */
-    /*
-    {
-        typedef void (*detach_pid_t)(struct task_struct *task, enum pid_type type);
-        detach_pid_t detach_pid_func;
-        detach_pid_func = (detach_pid_t)generic_kallsyms_lookup_name("detach_pid");
-        if (detach_pid_func)
-        {
-            // detach_pid_func(chf, PIDTYPE_PID);
-            // detach_pid_func(dhf, PIDTYPE_PID);
-        }
-    }
-    */
-
-    pr_debug("touch_inject_hidden: 初始化完成\n");
+    pr_err("[TI] touch_inject_hidden: 初始化完成（调试模式）\n");
     return 0;
 }
 
