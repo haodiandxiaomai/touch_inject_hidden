@@ -175,9 +175,8 @@ static inline void send_report(int x, int y, bool touching)
 
     local_irq_restore(flags);
 
-    pr_info("[touch_inject] send_report: %s (%d,%d) slot=%d->%d num_slots=%d->%d\n",
-            touching ? "TOUCH" : "RELEASE", x, y, old_slot, TARGET_SLOT_IDX,
-            PHYSICAL_SLOTS, TOTAL_SLOTS);
+    pr_err("[TI] SEND: %s (%d,%d) slot=%d->%d\n",
+            touching ? "TOUCH" : "RELEASE", x, y, old_slot, TARGET_SLOT_IDX);
 }
 
 /*
@@ -224,6 +223,9 @@ static inline int v_touch_init(int *max_x, int *max_y)
     if (!max_x || !max_y)
         return -EINVAL;
 
+    *max_x = 0;
+    *max_y = 0;
+
     if (vt.initialized)
     {
         *max_x = vt.dev->absinfo[ABS_MT_POSITION_X].maximum;
@@ -234,40 +236,56 @@ static inline int v_touch_init(int *max_x, int *max_y)
     input_class = (struct class *)generic_kallsyms_lookup_name("input_class");
     if (!input_class)
     {
-        pr_err("[touch_inject] input_class 查找失败\n");
+        pr_err("[TI] FATAL: input_class lookup failed\n");
         return -EFAULT;
     }
+    pr_err("[TI] input_class=%px\n", input_class);
 
     class_for_each_device(input_class, NULL, &found, match_touchscreen);
+    pr_err("[TI] match_touchscreen: found=%px\n", found);
+
     if (!found)
     {
-        pr_err("[touch_inject] 未找到触摸屏设备\n");
+        pr_err("[TI] FATAL: no touchscreen found\n");
         return -ENODEV;
     }
+
+    pr_err("[TI] device name=%s, absinfo=%px\n",
+           found->name ? found->name : "null", found->absinfo);
 
     get_device(&found->dev);
     vt.dev = found;
 
+    /* 读分辨率（hijack 之前） */
+    if (found->absinfo)
+    {
+        *max_x = found->absinfo[ABS_MT_POSITION_X].maximum;
+        *max_y = found->absinfo[ABS_MT_POSITION_Y].maximum;
+        pr_err("[TI] raw max=%dx%d, mt->num_slots=%d\n",
+               *max_x, *max_y, found->mt ? found->mt->num_slots : -1);
+    }
+    else
+    {
+        pr_err("[TI] FATAL: absinfo is NULL!\n");
+    }
+
     ret = hijack_init_slots(found);
     if (ret)
     {
-        pr_err("[touch_inject] MT 劫持失败, ret=%d\n", ret);
+        pr_err("[TI] hijack_init_slots failed: %d\n", ret);
         put_device(&found->dev);
         vt.dev = NULL;
         return ret;
     }
+    pr_err("[TI] hijack OK, new num_slots=%d\n", found->mt ? found->mt->num_slots : -1);
 
     vt.has_touch_major = test_bit(ABS_MT_TOUCH_MAJOR, found->absbit);
     vt.has_width_major = test_bit(ABS_MT_WIDTH_MAJOR, found->absbit);
     vt.has_pressure = test_bit(ABS_MT_PRESSURE, found->absbit);
-
-    *max_x = found->absinfo[ABS_MT_POSITION_X].maximum;
-    *max_y = found->absinfo[ABS_MT_POSITION_Y].maximum;
     vt.initialized = true;
 
-    pr_info("[touch_inject] 初始化成功: %s, max=%dx%d, slots=%d\n",
-            found->name ? found->name : "unknown", *max_x, *max_y,
-            found->mt ? found->mt->num_slots : -1);
+    pr_err("[TI] INIT DONE: max=%dx%d, mt=%px, evbit=0x%lx, absbit=0x%lx\n",
+           *max_x, *max_y, found->mt, found->evbit[0], found->absbit[0]);
 
     return 0;
 }
