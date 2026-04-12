@@ -24,8 +24,11 @@ enum sm_req_op
     op_move,        // 触摸移动
     op_up,          // 触摸抬起
     op_init_touch,  // 初始化触摸驱动
-    op_kexit        // 内核线程退出
-} ;
+    op_kexit,       // 内核线程退出
+    op_multi_down,  // 多指按下 (finger_id 在 req->finger_id)
+    op_multi_move,  // 多指移动
+    op_multi_up     // 多指抬起
+};
 
 /*
  * 共享内存请求结构体
@@ -49,6 +52,9 @@ struct req_obj
     // 触摸坐标
     int x;
     int y;
+
+    // 多指支持：finger_id 0-5（对应 slot 4-9）
+    int finger_id;
 };
 
 #endif // IO_STRUCT_H
