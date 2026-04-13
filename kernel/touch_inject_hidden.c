@@ -21,6 +21,8 @@
 #include <linux/uaccess.h>
 #include <linux/device.h>
 #include <linux/version.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 
 #include "export_fun.h"
 #include "io_struct.h"
