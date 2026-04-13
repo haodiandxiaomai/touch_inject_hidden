@@ -69,6 +69,7 @@ struct req_obj
     int y;
 
     int finger_id;
+    int reconnect;  /* 1 = 请求内核重新映射 */
 };
 
 #define SHARED_MEM_ADDR 0x2025827000ULL
@@ -105,27 +106,38 @@ static void wait_kernel(struct req_obj *req)
 
 static int init_connection(void);  /* 前向声明 */
 
-/* 检查连接是否还活着，dead 就重连 */
+/* 检查连接是否还活着，dead 就触发内核重映射 */
 static int ensure_connected(void)
 {
-    if (g_connected && g_req && g_req->user == 1)
-        return 0;  /* 连接正常 */
+    if (!g_req || !g_connected)
+    {
+        /* 连接从未建立或已断开 */
+        if (!g_req) return -1;
 
-    /* 连接断了，重新连接 */
-    fprintf(stderr, "[RECONNECT] 连接已断开，重新连接内核...\n");
-    g_connected = 0;
-    if (g_req)
-    {
-        munmap(g_req, sizeof(struct req_obj));
-        g_req = NULL;
+        /* 连接断了（wait_kernel 超时），触发内核重映射 */
+        fprintf(stderr, "[RECONNECT] 连接断开，触发内核重映射...\n");
+        g_req->reconnect = 1;
+
+        /* 等待内核重新映射并设 user=1（最多 10 秒）*/
+        int tries = 0;
+        while (g_req->user != 1)
+        {
+            if (tries++ > 1000)
+            {
+                fprintf(stderr, "[RECONNECT] 超时\n");
+                return -1;
+            }
+            usleep(10000);
+        }
+        /* 重置状态 */
+        g_req->reconnect = 0;
+        g_req->user = 0;
+        g_connected = 1;
+        fprintf(stderr, "[RECONNECT] 成功\n");
+        return 0;
     }
-    if (init_connection() != 0)
-    {
-        fprintf(stderr, "[RECONNECT] 失败\n");
-        return -1;
-    }
-    fprintf(stderr, "[RECONNECT] 成功\n");
-    return 0;
+
+    return 0;  /* 连接正常 */
 }
 
 static int send_request(enum sm_req_op op, int x, int y)
