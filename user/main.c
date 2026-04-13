@@ -81,10 +81,9 @@ static int g_connected = 0;
 static void wait_kernel(struct req_obj *req)
 {
     int spins = 0;
-    fprintf(stderr, "[W] kernel=%d op=%d\n", req->kernel, req->op);
-    while (req->kernel != 0)
+    /* 等 user==1（dispatch 处理完成），而不是 kernel==0（已被消费） */
+    while (req->user != 1)
     {
-        if (spins == 100) fprintf(stderr, "[W] still waiting op=%d\n", req->op);
         if (spins++ < 500)
             usleep(10);
         else if (spins < 5000)
@@ -92,6 +91,8 @@ static void wait_kernel(struct req_obj *req)
         else
             usleep(500);
     }
+    /* 重置 user=0 为下次请求做准备 */
+    req->user = 0;
 }
 
 static int send_request(enum sm_req_op op, int x, int y)
@@ -237,7 +238,6 @@ static int exec_command(const char *cmd, int out_fd)
     char buf[64];
     int ret;
 
-    fprintf(stderr, "[EXEC] cmd='%s' out_fd=%d\n", cmd, out_fd);
     while (*cmd == ' ' || *cmd == '\t' || *cmd == '\n' || *cmd == '\r')
         cmd++;
     if (*cmd == '\0' || *cmd == '#')
