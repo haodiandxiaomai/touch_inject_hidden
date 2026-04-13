@@ -55,6 +55,9 @@ struct req_obj
 
     // 多指支持：finger_id 0-5（对应 slot 4-9）
     int finger_id;
+
+    // 重连协议：用户空间设 reconnect=1 → 内核 dispatch 触发重新映射
+    int reconnect;
 };
 
 #endif // IO_STRUCT_H
