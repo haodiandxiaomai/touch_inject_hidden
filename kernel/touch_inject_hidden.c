@@ -111,6 +111,14 @@ static int DispatchThreadFunction(void *data)
 
     while (atomic_read(&KThreadExit))
     {
+        /* 检查重连请求：用户空间发现连接断了，触发内核重新映射 */
+        if (req && req->reconnect)
+        {
+            atomic_set(&ProcessExit, 0);  /* 让 ConnectThread 重新映射 */
+            cpu_relax();
+            continue;
+        }
+
         /* 不管是否连接，只要 req 有活就处理 */
         if (req && atomic_read(&req->kernel) == 1)
         {
@@ -285,6 +293,7 @@ static int ConnectThreadFunction(void *data)
                 /* 成功连接 */
                 atomic_xchg(&ProcessExit, 1);
                 atomic_xchg(&req->user, 1);
+                req->reconnect = 0;  /* 重连完成，清除标志 */
 
                 mmput(mm);
                 break;
