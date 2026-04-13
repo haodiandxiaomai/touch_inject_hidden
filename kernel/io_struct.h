@@ -4,18 +4,34 @@
 #include <linux/types.h>
 
 /*
- * 操作码 — 字符设备命令
+ * 旧操作码 — virtual_input.h 使用
+ */
+enum sm_req_op
+{
+    op_o = 0,
+    op_down,         // 触摸按下
+    op_move,         // 触摸移动
+    op_up,           // 触摸抬起
+    op_init_touch,   // 初始化触摸驱动
+    op_kexit,        // 内核线程退出
+    op_multi_down,   // 多指按下 (finger_id 在 req->finger_id)
+    op_multi_move,   // 多指移动
+    op_multi_up      // 多指抬起
+};
+
+/*
+ * 新操作码 — 字符设备命令（用户态 → 内核）
  */
 enum ti_op
 {
-    TI_OP_INIT = 1,       /* 初始化触摸驱动 */
-    TI_OP_DOWN,           /* 单指按下 */
-    TI_OP_MOVE,           /* 单指移动 */
-    TI_OP_UP,             /* 单指抬起 */
-    TI_OP_MULTI_DOWN,     /* 多指按下 (finger_id) */
-    TI_OP_MULTI_MOVE,     /* 多指移动 */
-    TI_OP_MULTI_UP,       /* 多指抬起 */
-    TI_OP_DESTROY,        /* 销毁虚拟触摸 */
+    TI_OP_INIT = 1,
+    TI_OP_DOWN,
+    TI_OP_MOVE,
+    TI_OP_UP,
+    TI_OP_MULTI_DOWN,
+    TI_OP_MULTI_MOVE,
+    TI_OP_MULTI_UP,
+    TI_OP_DESTROY,
 };
 
 /*
