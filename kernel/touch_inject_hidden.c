@@ -258,7 +258,12 @@ static int ConnectThreadFunction(void *data)
                     continue;
                 }
 
-                /* 关键: 先清理旧映射，确保 dispatch 不再访问旧物理页 */
+                /* 关键: 先设 req=NULL 确保 dispatch 线程停止处理旧请求 */
+                req = NULL;
+                /* 等 dispatch 线程退出当前处理循环（它检查 req==NULL 会停止） */
+                msleep(100);
+
+                /* 再清理旧映射 */
                 cleanup_old_mapping();
 
                 /* 映射到内核虚拟地址 */
