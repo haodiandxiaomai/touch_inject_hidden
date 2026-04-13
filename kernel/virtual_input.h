@@ -236,8 +236,6 @@ static inline void flush_virtual_fingers(void)
     }
     g_vt_mt_null = 0;
 
-    unlock_global_keys(dev);
-
     local_irq_save(flags);
 
     old_slot = dev->absinfo[ABS_MT_SLOT].value;
@@ -272,8 +270,6 @@ static inline void flush_virtual_fingers(void)
     atomic_inc(&g_sync_count);
 
     local_irq_restore(flags);
-
-    lock_global_keys(dev);
 
     atomic_inc(&g_send_count);
 }
@@ -447,7 +443,9 @@ static inline void v_touch_event(enum sm_req_op op, int x, int y)
             vt.fingers[0].x = x;
             vt.fingers[0].y = y;
             vt.active_count = 1;
+            unlock_global_keys(vt.dev);
             flush_virtual_fingers();
+            lock_global_keys(vt.dev);
         }
     }
     else if (op == op_up)
@@ -456,6 +454,7 @@ static inline void v_touch_event(enum sm_req_op op, int x, int y)
         {
             vt.fingers[0].tracking_id = -1;
             vt.active_count = 0;
+            unlock_global_keys(vt.dev);
             flush_virtual_fingers();
         }
     }
@@ -482,7 +481,9 @@ static inline void v_touch_multi_event(enum sm_req_op op, int finger_id, int x, 
             vt.fingers[finger_id].x = x;
             vt.fingers[finger_id].y = y;
             vt.active_count++;
+            unlock_global_keys(vt.dev);
             flush_virtual_fingers();
+            lock_global_keys(vt.dev);
         }
         else
         {
@@ -508,6 +509,7 @@ static inline void v_touch_multi_event(enum sm_req_op op, int finger_id, int x, 
             vt.fingers[finger_id].tracking_id = -1;
             vt.active_count--;
             if (vt.active_count < 0) vt.active_count = 0;
+            unlock_global_keys(vt.dev);
             flush_virtual_fingers();
         }
     }
