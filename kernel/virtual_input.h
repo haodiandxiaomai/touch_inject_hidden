@@ -195,6 +195,20 @@ static inline void send_finger_report(int slot, int x, int y, bool touching)
 }
 
 /* 刷新所有虚拟手指到 input 子系统 */
+static inline void lock_global_keys(struct input_dev *dev)
+{
+    clear_bit(BTN_TOUCH, dev->keybit);
+    clear_bit(BTN_TOOL_FINGER, dev->keybit);
+    clear_bit(BTN_TOOL_DOUBLETAP, dev->keybit);
+}
+
+static inline void unlock_global_keys(struct input_dev *dev)
+{
+    set_bit(BTN_TOUCH, dev->keybit);
+    set_bit(BTN_TOOL_FINGER, dev->keybit);
+    set_bit(BTN_TOOL_DOUBLETAP, dev->keybit);
+}
+
 static inline void flush_virtual_fingers(void)
 {
     struct input_dev *dev = vt.dev;
@@ -298,19 +312,6 @@ static inline int match_touchscreen(struct device *dev, void *data)
     return 0;
 }
 
-static inline void lock_global_keys(struct input_dev *dev)
-{
-    clear_bit(BTN_TOUCH, dev->keybit);
-    clear_bit(BTN_TOOL_FINGER, dev->keybit);
-    clear_bit(BTN_TOOL_DOUBLETAP, dev->keybit);
-}
-
-static inline void unlock_global_keys(struct input_dev *dev)
-{
-    set_bit(BTN_TOUCH, dev->keybit);
-    set_bit(BTN_TOOL_FINGER, dev->keybit);
-    set_bit(BTN_TOOL_DOUBLETAP, dev->keybit);
-}
 
 static inline int v_touch_init(int *max_x, int *max_y)
 {
