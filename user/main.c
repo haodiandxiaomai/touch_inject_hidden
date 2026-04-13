@@ -103,6 +103,8 @@ static void wait_kernel(struct req_obj *req)
     req->user = 0;
 }
 
+static int init_connection(void);  /* 前向声明 */
+
 /* 检查连接是否还活着，dead 就重连 */
 static int ensure_connected(void)
 {
