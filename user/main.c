@@ -90,18 +90,46 @@ static void wait_kernel(struct req_obj *req)
             usleep(100);
         else
             usleep(500);
+
+        /* 超时 5 秒，标记连接断开 */
+        if (spins > 10000)
+        {
+            fprintf(stderr, "[TIMEOUT] dispatch 未响应，连接可能已断开\n");
+            g_connected = 0;
+            return;
+        }
     }
     /* 重置 user=0 为下次请求做准备 */
     req->user = 0;
 }
 
-static int send_request(enum sm_req_op op, int x, int y)
+/* 检查连接是否还活着，dead 就重连 */
+static int ensure_connected(void)
 {
-    if (!g_req || !g_connected)
+    if (g_connected && g_req && g_req->user == 1)
+        return 0;  /* 连接正常 */
+
+    /* 连接断了，重新连接 */
+    fprintf(stderr, "[RECONNECT] 连接已断开，重新连接内核...\n");
+    g_connected = 0;
+    if (g_req)
     {
-        fprintf(stderr, "错误: 未连接到内核模块\n");
+        munmap(g_req, sizeof(struct req_obj));
+        g_req = NULL;
+    }
+    if (init_connection() != 0)
+    {
+        fprintf(stderr, "[RECONNECT] 失败\n");
         return -1;
     }
+    fprintf(stderr, "[RECONNECT] 成功\n");
+    return 0;
+}
+
+static int send_request(enum sm_req_op op, int x, int y)
+{
+    if (ensure_connected() != 0)
+        return -1;
 
     g_req->x = x;
     g_req->y = y;
@@ -115,11 +143,8 @@ static int send_request(enum sm_req_op op, int x, int y)
 
 static int send_multi_request(enum sm_req_op op, int finger_id, int x, int y)
 {
-    if (!g_req || !g_connected)
-    {
-        fprintf(stderr, "错误: 未连接到内核模块\n");
+    if (ensure_connected() != 0)
         return -1;
-    }
 
     g_req->finger_id = finger_id;
     g_req->x = x;
