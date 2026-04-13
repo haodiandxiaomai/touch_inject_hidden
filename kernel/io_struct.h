@@ -1,63 +1,45 @@
 #ifndef IO_STRUCT_H
 #define IO_STRUCT_H
-#include <linux/vmalloc.h>
-#include <linux/mm.h>
-#include <linux/slab.h>
-#include <linux/string.h>
-#include <asm/pgtable.h>
-#include <asm/pgtable-prot.h>
-#include <asm/memory.h>
-#include <asm/barrier.h>
-#include <linux/sched.h>
-#include <linux/sched/mm.h>
-#include <linux/sched/signal.h>
-#include <linux/pid.h>
+
+#include <linux/types.h>
 
 /*
- * 触摸注入专用操作码
- * 从 lsdriver 复刻，仅保留触摸相关功能
+ * 操作码 — 字符设备命令
  */
-enum sm_req_op
+enum ti_op
 {
-    op_o,           // 空调用
-    op_down,        // 触摸按下
-    op_move,        // 触摸移动
-    op_up,          // 触摸抬起
-    op_init_touch,  // 初始化触摸驱动
-    op_kexit,       // 内核线程退出
-    op_multi_down,  // 多指按下 (finger_id 在 req->finger_id)
-    op_multi_move,  // 多指移动
-    op_multi_up     // 多指抬起
+    TI_OP_INIT = 1,       /* 初始化触摸驱动 */
+    TI_OP_DOWN,           /* 单指按下 */
+    TI_OP_MOVE,           /* 单指移动 */
+    TI_OP_UP,             /* 单指抬起 */
+    TI_OP_MULTI_DOWN,     /* 多指按下 (finger_id) */
+    TI_OP_MULTI_MOVE,     /* 多指移动 */
+    TI_OP_MULTI_UP,       /* 多指抬起 */
+    TI_OP_DESTROY,        /* 销毁虚拟触摸 */
 };
 
 /*
- * 共享内存请求结构体
- * 简化版：只保留触摸注入所需字段
- * 删除了 pid, target_addr, size, user_buffer, mem_info, bt, bs, len_bytes, bp_info
- *
- * 注意：不能用 packed，否则 enum/op 变成 1 字节导致偏移与用户态不一致
+ * 用户态 → 内核 命令结构
+ * 通过 /dev/touch_inject write() 发送
  */
-struct req_obj
+struct ti_cmd
 {
-    atomic_t kernel; // 由用户模式设置: 1 = 内核有待处理的请求, 0 = 请求已完成
-    atomic_t user;   // 由内核模式设置: 1 = 用户模式有待处理的请求, 0 = 请求已完成
-
-    enum sm_req_op op; // 共享内存请求操作类型（4 字节，不用 packed）
-    int status;        // 操作状态（成功返回0，失败返回负值）
-
-    // 初始化触摸驱动时返回屏幕维度
-    int POSITION_X;
-    int POSITION_Y;
-
-    // 触摸坐标
+    int op;          /* enum ti_op */
     int x;
     int y;
+    int finger_id;   /* 0-5（多指模式） */
+};
 
-    // 多指支持：finger_id 0-5（对应 slot 4-9）
-    int finger_id;
-
-    // 重连协议：用户空间设 reconnect=1 → 内核 dispatch 触发重新映射
-    int reconnect;
+/*
+ * 内核 → 用户态 结果结构
+ * 通过 /dev/touch_inject read() 读取
+ */
+struct ti_result
+{
+    int op;          /* 对应的命令 */
+    int status;      /* 0=成功, 负值=错误 */
+    int x;           /* init 返回 max_x */
+    int y;           /* init 返回 max_y */
 };
 
 #endif // IO_STRUCT_H
