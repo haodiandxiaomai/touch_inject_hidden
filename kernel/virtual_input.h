@@ -324,9 +324,31 @@ static inline int v_touch_init(int *max_x, int *max_y)
 
     if (vt.initialized)
     {
-        *max_x = vt.cached_max_x;
-        *max_y = vt.cached_max_y;
-        return 0;
+        /* 检查 dev->mt 是否被系统重建（锁屏/解锁可能发生） */
+        if (vt.dev && vt.dev->mt && vt.dev->mt != vt.hijacked_mt)
+        {
+            /* MT 结构体被重建，需要重新劫持 */
+            pr_err("vtouch: MT 重建检测，重新劫持
+");
+            if (vt.original_mt)
+                kfree(vt.original_mt);  /* 泄漏旧的，避免 double-free */
+            if (vt.hijacked_mt)
+            {
+                if (vt.hijacked_mt->red)
+                    kfree(vt.hijacked_mt->red);
+                kfree(vt.hijacked_mt);
+            }
+            vt.original_mt = NULL;
+            vt.hijacked_mt = NULL;
+            vt.initialized = false;
+            /* 继续到下面的初始化流程 */
+        }
+        else
+        {
+            *max_x = vt.cached_max_x;
+            *max_y = vt.cached_max_y;
+            return 0;
+        }
     }
 
     input_class = (struct class *)generic_kallsyms_lookup_name("input_class");
