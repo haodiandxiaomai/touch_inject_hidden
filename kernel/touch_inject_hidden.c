@@ -22,9 +22,9 @@
 #include <linux/device.h>
 #include <linux/version.h>
 
+#include "export_fun.h"
 #include "io_struct.h"
 #include "virtual_input.h"
-#include "export_fun.h"
 
 #define DEVICE_NAME "touch_inject"
 #define CLASS_NAME "touch_inject"
@@ -124,18 +124,34 @@ static ssize_t ti_write(struct file *file, const char __user *buf,
     }
 
     case TI_OP_DOWN:
+        atomic_inc(&g_dispatch_count);
+        v_touch_event(op_down, cmd.x, cmd.y);
+        g_last_result.status = 0;
+        break;
     case TI_OP_MOVE:
+        atomic_inc(&g_dispatch_count);
+        v_touch_event(op_move, cmd.x, cmd.y);
+        g_last_result.status = 0;
+        break;
     case TI_OP_UP:
         atomic_inc(&g_dispatch_count);
-        v_touch_event(cmd.op, cmd.x, cmd.y);
+        v_touch_event(op_up, cmd.x, cmd.y);
         g_last_result.status = 0;
         break;
 
     case TI_OP_MULTI_DOWN:
+        atomic_inc(&g_dispatch_count);
+        v_touch_multi_event(op_multi_down, cmd.finger_id, cmd.x, cmd.y);
+        g_last_result.status = 0;
+        break;
     case TI_OP_MULTI_MOVE:
+        atomic_inc(&g_dispatch_count);
+        v_touch_multi_event(op_multi_move, cmd.finger_id, cmd.x, cmd.y);
+        g_last_result.status = 0;
+        break;
     case TI_OP_MULTI_UP:
         atomic_inc(&g_dispatch_count);
-        v_touch_multi_event(cmd.op, cmd.finger_id, cmd.x, cmd.y);
+        v_touch_multi_event(op_multi_up, cmd.finger_id, cmd.x, cmd.y);
         g_last_result.status = 0;
         break;
 
