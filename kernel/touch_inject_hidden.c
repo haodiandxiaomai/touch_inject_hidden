@@ -261,7 +261,7 @@ static int ConnectThreadFunction(void *data)
                 /* 关键: 先设 req=NULL 确保 dispatch 线程停止处理旧请求 */
                 req = NULL;
                 /* 等 dispatch 线程退出当前处理循环（它检查 req==NULL 会停止） */
-                msleep(100);
+                msleep(10);
 
                 /* 再清理旧映射 */
                 cleanup_old_mapping();
@@ -291,7 +291,7 @@ static int ConnectThreadFunction(void *data)
             }
         }
 
-        msleep(2000);
+        msleep(100);
     }
 
     /* 线程退出前清理 */
