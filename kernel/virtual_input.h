@@ -328,16 +328,17 @@ static inline int v_touch_init(int *max_x, int *max_y)
         if (vt.dev && vt.dev->mt && vt.dev->mt != vt.hijacked_mt)
         {
             /* MT 结构体被重建，需要重新劫持 */
-            pr_err("vtouch: MT 重建检测，重新劫持
-");
-            if (vt.original_mt)
-                kfree(vt.original_mt);  /* 泄漏旧的，避免 double-free */
+            pr_err("vtouch: MT 重建检测，重新劫持\n");
+            /* 释放旧的劫持 MT（我们的分配的） */
             if (vt.hijacked_mt)
             {
                 if (vt.hijacked_mt->red)
                     kfree(vt.hijacked_mt->red);
                 kfree(vt.hijacked_mt);
             }
+            /* 恢复原始 MT 指针 */
+            if (vt.original_mt)
+                vt.dev->mt = vt.original_mt;
             vt.original_mt = NULL;
             vt.hijacked_mt = NULL;
             vt.initialized = false;
